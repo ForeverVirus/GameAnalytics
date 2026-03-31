@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+target/
+
+# Tauri generated
+gen/schemas/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+
+# OS files
+*.lnk
+
+# Analytics cache (runtime)
+.analytics/
+
+# Temp files
+*.tmp
+*.bak
+claude html
+2026-03-30-gamescriptanalytics-design.md
