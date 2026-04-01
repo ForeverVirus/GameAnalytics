@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../store';
+import { api, type CliStatus } from '../api/tauri';
 
 const CLI_OPTIONS = [
   { id: 'claude', name: 'Claude CLI', icon: '🟣' },
@@ -8,6 +9,10 @@ const CLI_OPTIONS = [
   { id: 'codex', name: 'Codex CLI', icon: '🟢' },
   { id: 'copilot', name: 'Copilot CLI', icon: '⚪' },
 ];
+
+const EMPTY_CLI_STATUSES: Record<string, CliStatus> = Object.fromEntries(
+  CLI_OPTIONS.map((cli) => [cli.id, { available: false, resolved_path: null }]),
+);
 
 // Per-CLI model options
 const CLI_MODELS: Record<string, { id: string; name: string }[]> = {
@@ -27,8 +32,9 @@ const CLI_MODELS: Record<string, { id: string; name: string }[]> = {
     { id: '', name: 'Default' },
     { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+    { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite' },
+    { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)' },
     { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Preview)' },
-    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (Preview)' },
   ],
   copilot: [
     { id: '', name: 'Default' },
@@ -56,10 +62,25 @@ export default function Settings() {
   const [suspectedEnabled, setSuspectedEnabled] = useState(settings.suspected_enabled);
   const [scanScope, setScanScope] = useState(settings.scan_scope);
   const [saved, setSaved] = useState(false);
+  const [cliStatuses, setCliStatuses] = useState<Record<string, CliStatus>>({});
 
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  useEffect(() => {
+    let active = true;
+    api.detectAiClis()
+      .then((statuses) => {
+        if (active) setCliStatuses(statuses);
+      })
+      .catch(() => {
+        if (active) setCliStatuses(EMPTY_CLI_STATUSES);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Sync local state when settings load from backend
   useEffect(() => {
@@ -111,19 +132,28 @@ export default function Settings() {
         <div className="settings-label">{t('settings.aiCli')}</div>
         <div className="settings-desc">{t('settings.selectCli')}</div>
         <div className="cli-grid">
-          {CLI_OPTIONS.map((cli) => (
-            <div
-              key={cli.id}
-              className={`cli-card${selectedCli === cli.id ? ' selected' : ''}`}
-              onClick={() => { setSelectedCli(cli.id); setSelectedModel(''); setSelectedThinking(''); }}
-            >
-              <div style={{ fontSize: 28, marginBottom: 8 }}>{cli.icon}</div>
-              <div className="cli-name">{cli.name}</div>
-              <div className={`cli-status ${selectedCli === cli.id ? 'cli-detected' : 'cli-missing'}`}>
-                {selectedCli === cli.id ? `✓ ${t('settings.detected')}` : t('settings.notFound')}
+          {CLI_OPTIONS.map((cli) => {
+            const status = cliStatuses[cli.id];
+            const isAvailable = status?.available === true;
+            const statusText = status
+              ? (isAvailable ? `✓ ${t('settings.detected')}` : t('settings.notFound'))
+              : t('common.loading');
+
+            return (
+              <div
+                key={cli.id}
+                className={`cli-card${selectedCli === cli.id ? ' selected' : ''}`}
+                onClick={() => { setSelectedCli(cli.id); setSelectedModel(''); setSelectedThinking(''); }}
+                title={status?.resolved_path || cli.name}
+              >
+                <div style={{ fontSize: 28, marginBottom: 8 }}>{cli.icon}</div>
+                <div className="cli-name">{cli.name}</div>
+                <div className={`cli-status ${isAvailable ? 'cli-detected' : 'cli-missing'}`}>
+                  {statusText}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {/* Model selector */}

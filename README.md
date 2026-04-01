@@ -38,7 +38,7 @@
 - 点击可定位到源文件
 
 ### 🤖 AI 分析
-- 集成本地 AI CLI 工具（Claude CLI / Codex CLI / Gemini CLI / Copilot CLI）
+- 集成本地 AI CLI 工具（Claude CLI / Codex CLI / Gemini CLI / Copilot CLI，当前按 Windows 环境适配）
 - 快速分析（5 分钟超时）和深度分析（10 分钟超时）
 - 批量分析：按目录逐批发送给 AI，生成项目级摘要
 - 分析结果持久化到每个节点，下次打开自动加载
@@ -61,7 +61,7 @@
 
 ## 系统要求
 
-- **操作系统**：Windows 10+、macOS 10.15+、Linux（X11）
+- **操作系统**：Windows 10+（当前正式支持平台）
 - **Node.js**：18+
 - **Rust**：1.77.2+（含 Cargo）
 - **AI 分析（可选）**：需安装至少一个 AI CLI 工具
@@ -69,6 +69,12 @@
   - [Codex CLI](https://github.com/openai/codex)
   - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
   - [GitHub Copilot CLI](https://docs.github.com/en/copilot)
+
+### 平台说明
+
+- 当前版本只把 Windows 作为正式支持和验证平台。
+- 仓库里虽然保留了少量 macOS / Linux 分支代码（例如文件管理器打开逻辑、Tauri 图标资源），但没有完成这些平台上的 AI CLI 启动、PATH 继承、打包与回归验证。
+- 因此目前不要把 macOS / Linux 视为已支持平台；如果后续补完验证流程，再单独恢复文档声明。
 
 ---
 
@@ -105,6 +111,8 @@ npm run tauri build
 - **Windows**: `src-tauri/target/release/gamescript-analytics.exe`
 - **安装包**: `src-tauri/target/release/bundle/nsis/GameScriptAnalytics_*-setup.exe`
 - **MSI**: `src-tauri/target/release/bundle/msi/GameScriptAnalytics_*.msi`
+
+当前文档只维护 Windows 构建产物说明。
 
 ### 5. 编译 Debug 版本
 

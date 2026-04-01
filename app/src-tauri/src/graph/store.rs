@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use crate::graph::model::*;
+use std::collections::HashMap;
 
 /// In-memory graph store holding nodes, edges, and analysis results
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -53,7 +53,11 @@ impl GraphStore {
 
     /// Promote a suspected reference to official graph
     pub fn promote_suspected(&mut self, suspected_id: &str) -> bool {
-        if let Some(sr) = self.suspected_refs.iter_mut().find(|s| s.id == suspected_id) {
+        if let Some(sr) = self
+            .suspected_refs
+            .iter_mut()
+            .find(|s| s.id == suspected_id)
+        {
             sr.status = SuspectedStatus::Confirmed;
             let already_exists = self.edges.iter().any(|edge| {
                 edge.source == sr.code_location
@@ -86,7 +90,11 @@ impl GraphStore {
 
     /// Ignore a suspected reference
     pub fn ignore_suspected(&mut self, suspected_id: &str) -> bool {
-        if let Some(sr) = self.suspected_refs.iter_mut().find(|s| s.id == suspected_id) {
+        if let Some(sr) = self
+            .suspected_refs
+            .iter_mut()
+            .find(|s| s.id == suspected_id)
+        {
             sr.status = SuspectedStatus::Ignored;
             true
         } else {
@@ -104,7 +112,12 @@ impl GraphStore {
         self.stats.official_edges = self
             .edges
             .iter()
-            .filter(|e| matches!(e.reference_class, ReferenceClass::Official | ReferenceClass::UserConfirmed))
+            .filter(|e| {
+                matches!(
+                    e.reference_class,
+                    ReferenceClass::Official | ReferenceClass::UserConfirmed
+                )
+            })
             .count() as u32;
         self.stats.suspected_count = self
             .suspected_refs

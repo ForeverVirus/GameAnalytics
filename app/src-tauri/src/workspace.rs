@@ -31,7 +31,10 @@ pub fn detect_engine(project_path: &Path) -> EngineType {
 /// Scan project directory and return file inventory
 pub fn scan_project(project_path: &Path) -> Result<ProjectInfo, String> {
     if !project_path.is_dir() {
-        return Err(format!("Path is not a directory: {}", project_path.display()));
+        return Err(format!(
+            "Path is not a directory: {}",
+            project_path.display()
+        ));
     }
 
     let engine = detect_engine(project_path);
@@ -154,24 +157,57 @@ fn is_relevant_file(path: &Path, engine: &EngineType) -> bool {
     match engine {
         EngineType::Unity => matches!(
             ext.as_str(),
-            "cs" | "unity" | "prefab" | "mat" | "asset"
-                | "shader" | "cginc"
-                | "png" | "jpg" | "jpeg" | "tga" | "psd" | "tif"
-                | "wav" | "mp3" | "ogg" | "aiff"
-                | "fbx" | "obj" | "blend"
-                | "anim" | "controller" | "overrideController"
-                | "renderTexture" | "cubemap" | "flare"
-                | "fontsettings" | "guiskin" | "mixer"
-                | "physicMaterial" | "physicsMaterial2D"
+            "cs" | "unity"
+                | "prefab"
+                | "mat"
+                | "asset"
+                | "shader"
+                | "cginc"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "tga"
+                | "psd"
+                | "tif"
+                | "wav"
+                | "mp3"
+                | "ogg"
+                | "aiff"
+                | "fbx"
+                | "obj"
+                | "blend"
+                | "anim"
+                | "controller"
+                | "overrideController"
+                | "renderTexture"
+                | "cubemap"
+                | "flare"
+                | "fontsettings"
+                | "guiskin"
+                | "mixer"
+                | "physicMaterial"
+                | "physicsMaterial2D"
         ),
         EngineType::Godot => matches!(
             ext.as_str(),
-            "gd" | "cs" | "tscn" | "tres" | "gdshader"
-                | "png" | "jpg" | "jpeg" | "svg"
-                | "wav" | "mp3" | "ogg"
-                | "glb" | "gltf" | "obj"
-                | "gdnlib" | "gdns"
-                | "import" | "cfg"
+            "gd" | "cs"
+                | "tscn"
+                | "tres"
+                | "gdshader"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "svg"
+                | "wav"
+                | "mp3"
+                | "ogg"
+                | "glb"
+                | "gltf"
+                | "obj"
+                | "gdnlib"
+                | "gdns"
+                | "import"
+                | "cfg"
         ),
         EngineType::Unknown => false,
     }

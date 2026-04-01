@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::fs;
 use regex::Regex;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 use walkdir::WalkDir;
 
 use crate::graph::model::*;
@@ -17,7 +17,9 @@ pub fn build_unity_guid_map(project_root: &Path) -> HashMap<String, String> {
 
     for entry in WalkDir::new(&assets_dir)
         .into_iter()
-        .filter_entry(|e| !workspace::is_ignored_entry(e.file_name().to_str().unwrap_or(""), &gitignore_dirs))
+        .filter_entry(|e| {
+            !workspace::is_ignored_entry(e.file_name().to_str().unwrap_or(""), &gitignore_dirs)
+        })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
@@ -49,7 +51,15 @@ pub fn analyze_unity_references(
     node_ids: &HashSet<String>,
 ) -> Vec<GraphEdge> {
     let guid_ref_re = Regex::new(r"guid:\s*([0-9a-fA-F]{32})").unwrap();
-    let yaml_extensions = ["prefab", "unity", "mat", "asset", "controller", "overrideController", "anim"];
+    let yaml_extensions = [
+        "prefab",
+        "unity",
+        "mat",
+        "asset",
+        "controller",
+        "overrideController",
+        "anim",
+    ];
     let mut edges = Vec::new();
 
     for file_rel in files {
@@ -129,7 +139,8 @@ fn extract_identifiers(content: &str) -> HashSet<String> {
         let bytes = line.as_bytes();
         let mut start: Option<usize> = None;
         for i in 0..=bytes.len() {
-            let is_ident = i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_');
+            let is_ident =
+                i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_');
             if is_ident {
                 if start.is_none() {
                     start = Some(i);
@@ -164,8 +175,15 @@ pub fn analyze_code_references_batch(
         // Check inheritance
         for caps in inherit_re.captures_iter(&content) {
             let base_class = caps[1].to_string();
-            if matches!(base_class.as_str(), "MonoBehaviour" | "ScriptableObject" | "Editor"
-                | "EditorWindow" | "Component" | "Behaviour") {
+            if matches!(
+                base_class.as_str(),
+                "MonoBehaviour"
+                    | "ScriptableObject"
+                    | "Editor"
+                    | "EditorWindow"
+                    | "Component"
+                    | "Behaviour"
+            ) {
                 continue;
             }
             if let Some(target_file) = class_to_file.get(&base_class) {
@@ -208,10 +226,7 @@ pub fn analyze_code_references_batch(
 }
 
 /// Detect hardcoded values in source code files
-pub fn detect_hardcodes(
-    project_root: &Path,
-    files: &[String],
-) -> Vec<HardcodeFinding> {
+pub fn detect_hardcodes(project_root: &Path, files: &[String]) -> Vec<HardcodeFinding> {
     let mut findings = Vec::new();
     let path_re = Regex::new(r#""((?:Assets|Resources|res://|Packages)[^"]{3,})""#).unwrap();
     let url_re = Regex::new(r#""(https?://[^"]+)""#).unwrap();
@@ -235,9 +250,12 @@ pub fn detect_hardcodes(
         for (line_num, line) in content.lines().enumerate() {
             let trimmed = line.trim();
             // Skip comments and attributes
-            if trimmed.starts_with("//") || trimmed.starts_with("///")
-                || trimmed.starts_with("[") || trimmed.starts_with("#")
-                || trimmed.starts_with("/*") || trimmed.starts_with("*")
+            if trimmed.starts_with("//")
+                || trimmed.starts_with("///")
+                || trimmed.starts_with("[")
+                || trimmed.starts_with("#")
+                || trimmed.starts_with("/*")
+                || trimmed.starts_with("*")
             {
                 continue;
             }
@@ -290,11 +308,7 @@ pub fn detect_hardcodes(
 }
 
 fn infer_asset_kind_from_path(file_rel: &str) -> Option<AssetKind> {
-    let ext = file_rel
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = file_rel.rsplit('.').next().unwrap_or("").to_lowercase();
 
     match ext.as_str() {
         "unity" | "tscn" => Some(AssetKind::Scene),
@@ -322,15 +336,14 @@ fn matches_unity_resource_type(file_rel: &str, unity_type: Option<&str>) -> bool
         .next()
         .unwrap_or(type_name)
         .to_lowercase();
-    let ext = file_rel
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = file_rel.rsplit('.').next().unwrap_or("").to_lowercase();
 
     match normalized.as_str() {
         "texture" | "texture2d" | "sprite" | "cubemap" | "rendertexture" => {
-            matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "tga" | "psd" | "tif" | "svg")
+            matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "tga" | "psd" | "tif" | "svg"
+            )
         }
         "material" => ext == "mat",
         "audioclip" => matches!(ext.as_str(), "wav" | "mp3" | "ogg" | "aiff"),
@@ -343,8 +356,11 @@ fn matches_unity_resource_type(file_rel: &str, unity_type: Option<&str>) -> bool
         "textasset" => matches!(ext.as_str(), "txt" | "json" | "bytes" | "xml" | "csv"),
         "scriptableobject" => ext == "asset",
         "sceneasset" => ext == "unity",
-        "font" | "fontasset" | "tmp_fontasset" => matches!(ext.as_str(), "fontsettings" | "ttf" | "otf" | "fnt"),
-        "texture[]" | "texture2d[]" | "sprite[]" | "gameobject[]" | "material[]" | "audioclip[]" => {
+        "font" | "fontasset" | "tmp_fontasset" => {
+            matches!(ext.as_str(), "fontsettings" | "ttf" | "otf" | "fnt")
+        }
+        "texture[]" | "texture2d[]" | "sprite[]" | "gameobject[]" | "material[]"
+        | "audioclip[]" => {
             matches_unity_resource_type(file_rel, Some(normalized.trim_end_matches("[]")))
         }
         _ => true,
@@ -362,7 +378,9 @@ fn build_asset_inventory(project_root: &Path) -> Vec<String> {
 
     for entry in WalkDir::new(&assets_dir)
         .into_iter()
-        .filter_entry(|e| !workspace::is_ignored_entry(e.file_name().to_str().unwrap_or(""), &gitignore_dirs))
+        .filter_entry(|e| {
+            !workspace::is_ignored_entry(e.file_name().to_str().unwrap_or(""), &gitignore_dirs)
+        })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
@@ -410,7 +428,10 @@ fn resolve_inventory_candidates(
     } else {
         format!("Assets/{}", normalized_query)
     };
-    let query_segments: Vec<&str> = normalized_query.split('/').filter(|s| !s.is_empty()).collect();
+    let query_segments: Vec<&str> = normalized_query
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     let query_basename = query_segments.last().copied().unwrap_or("").to_lowercase();
 
     let mut results: Vec<(String, Option<AssetKind>, String)> = Vec::new();
@@ -463,7 +484,8 @@ fn resolve_inventory_candidates(
                 let asset_dir_no_assets_lower = asset_dir_no_assets.to_lowercase();
 
                 if asset_dir_lower == query_assets_lower
-                    || asset_dir_lower.ends_with(&(String::from("/") + &normalized_query.to_lowercase()))
+                    || asset_dir_lower
+                        .ends_with(&(String::from("/") + &normalized_query.to_lowercase()))
                     || asset_dir_no_assets_lower == query_no_ext
                     || asset_dir_no_assets_lower.ends_with(&(String::from("/") + &query_no_ext))
                 {
@@ -471,7 +493,8 @@ fn resolve_inventory_candidates(
                 }
             } else if asset_lower == query_assets_lower.to_lowercase() {
                 matched_reason = Some("资产路径精确匹配".to_string());
-            } else if asset_lower.ends_with(&(String::from("/") + &normalized_query.to_lowercase())) {
+            } else if asset_lower.ends_with(&(String::from("/") + &normalized_query.to_lowercase()))
+            {
                 matched_reason = Some("资产路径后缀匹配".to_string());
             } else if asset_no_ext_lower == query_assets_lower.to_lowercase()
                 || asset_no_ext_lower.ends_with(&(String::from("/") + &query_no_ext))
@@ -483,7 +506,11 @@ fn resolve_inventory_candidates(
         }
 
         if let Some(reason) = matched_reason {
-            results.push((normalized_asset.clone(), infer_asset_kind_from_path(&normalized_asset), reason));
+            results.push((
+                normalized_asset.clone(),
+                infer_asset_kind_from_path(&normalized_asset),
+                reason,
+            ));
         }
     }
 
@@ -532,7 +559,9 @@ fn resolve_unity_resources_candidates(
                 Ok(rel) => rel.to_string_lossy().to_string().replace('\\', "/"),
                 Err(_) => continue,
             };
-            if infer_asset_kind_from_path(&rel).is_none() || !matches_unity_resource_type(&rel, unity_type) {
+            if infer_asset_kind_from_path(&rel).is_none()
+                || !matches_unity_resource_type(&rel, unity_type)
+            {
                 continue;
             }
             results.push((rel.clone(), infer_asset_kind_from_path(&rel)));
@@ -575,7 +604,9 @@ fn resolve_unity_resources_candidates(
                 Ok(rel) => rel.to_string_lossy().to_string().replace('\\', "/"),
                 Err(_) => continue,
             };
-            if infer_asset_kind_from_path(&rel).is_none() || !matches_unity_resource_type(&rel, unity_type) {
+            if infer_asset_kind_from_path(&rel).is_none()
+                || !matches_unity_resource_type(&rel, unity_type)
+            {
                 continue;
             }
             results.push((rel.clone(), infer_asset_kind_from_path(&rel)));
@@ -600,7 +631,10 @@ fn push_suspected_ref(
     confidence: f32,
     ai_explanation: Option<String>,
 ) {
-    let dedupe_key = format!("{}|{}|{}|{}", file_rel, line_num, method_name, resource_path);
+    let dedupe_key = format!(
+        "{}|{}|{}|{}",
+        file_rel, line_num, method_name, resource_path
+    );
     if !seen_refs.insert(dedupe_key) {
         return;
     }
@@ -634,7 +668,8 @@ fn push_unity_resources_candidates(
     confidence: f32,
     load_all: bool,
 ) {
-    let candidates = resolve_unity_resources_candidates(project_root, resource_path, unity_type, load_all);
+    let candidates =
+        resolve_unity_resources_candidates(project_root, resource_path, unity_type, load_all);
     let explanation = unity_type.map(|t| format!("从 {} 推断资源类型为 {}", method_name, t));
 
     if candidates.is_empty() {
@@ -694,7 +729,13 @@ fn push_asset_inventory_candidates(
     prefer_resources: bool,
     heuristic_tag: &str,
 ) {
-    let candidates = resolve_inventory_candidates(asset_inventory, resource_path, unity_type, load_all, prefer_resources);
+    let candidates = resolve_inventory_candidates(
+        asset_inventory,
+        resource_path,
+        unity_type,
+        load_all,
+        prefer_resources,
+    );
 
     if candidates.is_empty() {
         push_suspected_ref(
@@ -708,7 +749,10 @@ fn push_asset_inventory_candidates(
             resource_path.to_string(),
             None,
             confidence,
-            Some(format!("{}：未能静态定位到具体资源，保留原始键值", heuristic_tag)),
+            Some(format!(
+                "{}：未能静态定位到具体资源，保留原始键值",
+                heuristic_tag
+            )),
         );
         return;
     }
@@ -786,7 +830,10 @@ fn extract_static_string_value(expr: &str) -> Option<String> {
         return None;
     }
     for prefix in ["@\"", "\""] {
-        if trimmed.starts_with(prefix) && trimmed.ends_with('"') && trimmed.len() >= prefix.len() + 1 {
+        if trimmed.starts_with(prefix)
+            && trimmed.ends_with('"')
+            && trimmed.len() >= prefix.len() + 1
+        {
             let inner = &trimmed[prefix.len()..trimmed.len() - 1];
             return Some(inner.to_string());
         }
@@ -910,7 +957,11 @@ fn extract_first_argument_expression(invocation: &str) -> Option<String> {
         match ch {
             '"' => in_string = true,
             '(' => paren_depth += 1,
-            ')' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && angle_depth == 0 => {
+            ')' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0 =>
+            {
                 return Some(args[..idx].trim().to_string());
             }
             ')' if paren_depth > 0 => paren_depth -= 1,
@@ -920,7 +971,11 @@ fn extract_first_argument_expression(invocation: &str) -> Option<String> {
             '}' if brace_depth > 0 => brace_depth -= 1,
             '<' => angle_depth += 1,
             '>' if angle_depth > 0 => angle_depth -= 1,
-            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 && angle_depth == 0 => {
+            ',' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0 =>
+            {
                 return Some(args[..idx].trim().to_string());
             }
             _ => {}
@@ -931,7 +986,8 @@ fn extract_first_argument_expression(invocation: &str) -> Option<String> {
 }
 
 fn extract_unity_type_from_invocation(invocation: &str) -> Option<String> {
-    let generic_re = Regex::new(r#"\.\s*[A-Za-z_]\w*\s*<\s*([A-Za-z_][\w\.\[\],<>]*)\s*>\s*\("#).ok()?;
+    let generic_re =
+        Regex::new(r#"\.\s*[A-Za-z_]\w*\s*<\s*([A-Za-z_][\w\.\[\],<>]*)\s*>\s*\("#).ok()?;
     if let Some(caps) = generic_re.captures(invocation) {
         return caps.get(1).map(|m| m.as_str().to_string());
     }
@@ -952,14 +1008,20 @@ fn asset_kind_from_unity_type(unity_type: Option<&str>) -> Option<AssetKind> {
         .to_lowercase();
 
     match normalized.as_str() {
-        "texture" | "texture2d" | "sprite" | "cubemap" | "rendertexture" => Some(AssetKind::Texture),
+        "texture" | "texture2d" | "sprite" | "cubemap" | "rendertexture" => {
+            Some(AssetKind::Texture)
+        }
         "material" => Some(AssetKind::Material),
         "audioclip" => Some(AssetKind::Audio),
         "gameobject" => Some(AssetKind::Prefab),
-        "animationclip" | "runtimeanimatorcontroller" | "animatorcontroller" => Some(AssetKind::Animation),
+        "animationclip" | "runtimeanimatorcontroller" | "animatorcontroller" => {
+            Some(AssetKind::Animation)
+        }
         "shader" | "computeshader" => Some(AssetKind::Shader),
         "sceneasset" => Some(AssetKind::Scene),
-        "scriptableobject" | "textasset" | "font" | "fontasset" | "tmp_fontasset" => Some(AssetKind::Data),
+        "scriptableobject" | "textasset" | "font" | "fontasset" | "tmp_fontasset" => {
+            Some(AssetKind::Data)
+        }
         _ => None,
     }
 }
@@ -988,7 +1050,11 @@ fn lookup_variable_assignment(var_name: &str, content_before_offset: &str) -> Op
     None
 }
 
-fn classify_dynamic_resource_expression(expr: &str, context: &str, content_before_offset: &str) -> Option<(String, f32, String)> {
+fn classify_dynamic_resource_expression(
+    expr: &str,
+    context: &str,
+    content_before_offset: &str,
+) -> Option<(String, f32, String)> {
     let compact = compact_expression(expr);
     if compact.is_empty() || extract_static_string_value(&compact).is_some() {
         return None;
@@ -1008,14 +1074,54 @@ fn classify_dynamic_resource_expression(expr: &str, context: &str, content_befor
     let lower_expr = effective_expr.to_lowercase();
     let lower_context = context.to_lowercase();
     let asset_keywords = [
-        "path", "icon", "sprite", "texture", "tex", "prefab", "model", "asset", "address",
-        "bundle", "scene", "audio", "clip", "bgm", "sfx", "effect", "fx", "material", "mat",
-        "avatar", "anim", "controller", "font", "ui", "res", "resource",
+        "path",
+        "icon",
+        "sprite",
+        "texture",
+        "tex",
+        "prefab",
+        "model",
+        "asset",
+        "address",
+        "bundle",
+        "scene",
+        "audio",
+        "clip",
+        "bgm",
+        "sfx",
+        "effect",
+        "fx",
+        "material",
+        "mat",
+        "avatar",
+        "anim",
+        "controller",
+        "font",
+        "ui",
+        "res",
+        "resource",
     ];
     let data_source_keywords = [
-        "cfg", "conf", "config", "table", "row", "record", "excel", "luban", "proto", "protobuf",
-        "deserialize", "deserializ", "parsefrom", "messageparser", "serializer.deserialize",
-        "jsonutility.fromjson", "fromjson", "datatable", "tb", "template",
+        "cfg",
+        "conf",
+        "config",
+        "table",
+        "row",
+        "record",
+        "excel",
+        "luban",
+        "proto",
+        "protobuf",
+        "deserialize",
+        "deserializ",
+        "parsefrom",
+        "messageparser",
+        "serializer.deserialize",
+        "jsonutility.fromjson",
+        "fromjson",
+        "datatable",
+        "tb",
+        "template",
     ];
 
     let asset_hit = asset_keywords.iter().any(|kw| lower_expr.contains(kw));
@@ -1030,9 +1136,15 @@ fn classify_dynamic_resource_expression(expr: &str, context: &str, content_befor
         || effective_expr.contains("Get")
         || effective_expr.contains("get");
     let identifier_asset_hint = identifier_re.is_match(&compact)
-        && asset_keywords.iter().any(|kw| compact.to_lowercase().contains(kw));
+        && asset_keywords
+            .iter()
+            .any(|kw| compact.to_lowercase().contains(kw));
 
-    if !(data_hit || (asset_hit && dynamic_shape) || identifier_asset_hint || effective_expr != compact) {
+    if !(data_hit
+        || (asset_hit && dynamic_shape)
+        || identifier_asset_hint
+        || effective_expr != compact)
+    {
         return None;
     }
 
@@ -1061,7 +1173,9 @@ fn push_dynamic_expression_suspected_ref(
     base_confidence: f32,
     heuristic_tag: &str,
 ) {
-    let Some((effective_expr, inferred_confidence, detail)) = classify_dynamic_resource_expression(arg_expr, context, content_before_offset) else {
+    let Some((effective_expr, inferred_confidence, detail)) =
+        classify_dynamic_resource_expression(arg_expr, context, content_before_offset)
+    else {
         return;
     };
 
@@ -1102,30 +1216,21 @@ pub fn detect_suspected_references(
     let asset_inventory = build_asset_inventory(project_root);
     let unity_type_pattern = r#"([A-Za-z_][\w\.\[\],<>]*)"#;
     let unity_string_pattern = r#"[@$]?"([^"]*)""#;
-    let resources_load_re = Regex::new(
-        &format!(
-            r#"Resources\.Load\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
-            unity_type_pattern,
-            unity_string_pattern,
-            unity_type_pattern
-        )
-    ).unwrap();
-    let resources_loadall_re = Regex::new(
-        &format!(
-            r#"Resources\.LoadAll\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
-            unity_type_pattern,
-            unity_string_pattern,
-            unity_type_pattern
-        )
-    ).unwrap();
-    let resources_loadasync_re = Regex::new(
-        &format!(
-            r#"Resources\.LoadAsync\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
-            unity_type_pattern,
-            unity_string_pattern,
-            unity_type_pattern
-        )
-    ).unwrap();
+    let resources_load_re = Regex::new(&format!(
+        r#"Resources\.Load\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
+        unity_type_pattern, unity_string_pattern, unity_type_pattern
+    ))
+    .unwrap();
+    let resources_loadall_re = Regex::new(&format!(
+        r#"Resources\.LoadAll\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
+        unity_type_pattern, unity_string_pattern, unity_type_pattern
+    ))
+    .unwrap();
+    let resources_loadasync_re = Regex::new(&format!(
+        r#"Resources\.LoadAsync\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
+        unity_type_pattern, unity_string_pattern, unity_type_pattern
+    ))
+    .unwrap();
     let instantiate_resources_load_re = Regex::new(
         &format!(
             r#"Instantiate\s*\(\s*Resources\.Load\s*(?:<\s*{}\s*>)?\s*\(\s*{}(?:\s*,\s*typeof\s*\(\s*{}\s*\))?"#,
@@ -1150,7 +1255,8 @@ pub fn detect_suspected_references(
             unity_type_pattern
         )
     ).unwrap();
-    let resources_dynamic_call_re = Regex::new(r#"\bResources\.(Load|LoadAll|LoadAsync)\b"#).unwrap();
+    let resources_dynamic_call_re =
+        Regex::new(r#"\bResources\.(Load|LoadAll|LoadAsync)\b"#).unwrap();
     let engine_loader_call_re = Regex::new(
         r#"\b(?:Addressables|YooAssets|package|[A-Za-z_][\w]*(?:Package|Handle|Operation|Bundle))\s*\.\s*(LoadAssetAsync|LoadAsset|LoadAssetWithSubAssets|LoadAllAssets|LoadAllAssetsAsync|LoadSceneAsync|InstantiateAsync|LoadSubAssetsAsync|LoadAssetsAsync)\b"#
     ).unwrap();
@@ -1158,10 +1264,23 @@ pub fn detect_suspected_references(
         r#"\b([A-Za-z_][\w]*(?:Manager|Mgr|Loader|Resource|Resources|Res|Asset|Assets|Bundle|Package)[A-Za-z_0-9]*)\s*\.\s*(Load|LoadAll|LoadAsync|LoadAsset|LoadAssetAsync|LoadAssetsAsync|LoadAllAssets|LoadAllAssetsAsync|LoadSceneAsync|InstantiateAsync)\b"#
     ).unwrap();
     let simple_load_patterns: Vec<(Regex, &str, f32)> = vec![
-        (Regex::new(r#"AssetBundle\.Load(?:From(?:File|Memory|Stream))?\s*\(\s*"([^"]+)""#).unwrap(), "AssetBundle.Load", 0.7),
+        (
+            Regex::new(r#"AssetBundle\.Load(?:From(?:File|Memory|Stream))?\s*\(\s*"([^"]+)""#)
+                .unwrap(),
+            "AssetBundle.Load",
+            0.7,
+        ),
         // Godot GDScript
-        (Regex::new(r#"(?:load|preload)\s*\(\s*"([^"]+)""#).unwrap(), "GDScript.load", 0.95),
-        (Regex::new(r#"ResourceLoader\.load\s*\(\s*"([^"]+)""#).unwrap(), "ResourceLoader.load", 0.9),
+        (
+            Regex::new(r#"(?:load|preload)\s*\(\s*"([^"]+)""#).unwrap(),
+            "GDScript.load",
+            0.95,
+        ),
+        (
+            Regex::new(r#"ResourceLoader\.load\s*\(\s*"([^"]+)""#).unwrap(),
+            "ResourceLoader.load",
+            0.9,
+        ),
     ];
 
     let code_extensions = ["cs", "gd"];
@@ -1408,7 +1527,9 @@ pub fn detect_suspected_references(
             let content_before_offset = &content[..full_match.start()];
             let method_name = caps.get(1).map(|m| m.as_str()).unwrap_or("Load");
             let unity_type = extract_unity_type_from_invocation(&invocation);
-            if let Some(static_path) = resolve_expression_to_static_string(&arg_expr, content_before_offset) {
+            if let Some(static_path) =
+                resolve_expression_to_static_string(&arg_expr, content_before_offset)
+            {
                 push_unity_resources_candidates(
                     project_root,
                     &mut suspected_refs,
@@ -1471,7 +1592,9 @@ pub fn detect_suspected_references(
                     None
                 }
             });
-            if let Some(static_path) = resolve_expression_to_static_string(&arg_expr, content_before_offset) {
+            if let Some(static_path) =
+                resolve_expression_to_static_string(&arg_expr, content_before_offset)
+            {
                 push_asset_inventory_candidates(
                     &asset_inventory,
                     &mut suspected_refs,
@@ -1544,7 +1667,9 @@ pub fn detect_suspected_references(
                     || receiver_lower.contains("resources")
                     || matches!(method_name, "Load" | "LoadAll" | "LoadAsync")
             };
-            if let Some(static_path) = resolve_expression_to_static_string(&arg_expr, content_before_offset) {
+            if let Some(static_path) =
+                resolve_expression_to_static_string(&arg_expr, content_before_offset)
+            {
                 push_asset_inventory_candidates(
                     &asset_inventory,
                     &mut suspected_refs,
@@ -1557,7 +1682,10 @@ pub fn detect_suspected_references(
                     &static_path,
                     unity_type.as_deref(),
                     0.64,
-                    matches!(method_name, "LoadAll" | "LoadAllAssets" | "LoadAllAssetsAsync"),
+                    matches!(
+                        method_name,
+                        "LoadAll" | "LoadAllAssets" | "LoadAllAssetsAsync"
+                    ),
                     prefer_resources,
                     "自定义加载器启发式推断",
                 );
@@ -1639,9 +1767,9 @@ fn parse_csharp_file(file_rel: &str, content: &str, store: &mut GraphStore) {
     let class_re = Regex::new(
         r"(?:public|private|protected|internal)\s+(?:(?:abstract|sealed|static|partial)\s+)*(?:class|struct)\s+(\w+)"
     ).unwrap();
-    let iface_re = Regex::new(
-        r"(?:public|private|protected|internal)\s+(?:partial\s+)?interface\s+(\w+)"
-    ).unwrap();
+    let iface_re =
+        Regex::new(r"(?:public|private|protected|internal)\s+(?:partial\s+)?interface\s+(\w+)")
+            .unwrap();
 
     #[derive(Clone)]
     struct TypeContext {
@@ -1660,17 +1788,25 @@ fn parse_csharp_file(file_rel: &str, content: &str, store: &mut GraphStore) {
 
         // Handle block comments
         if in_block_comment {
-            if trimmed.contains("*/") { in_block_comment = false; }
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
             continue;
         }
         if trimmed.starts_with("/*") {
             in_block_comment = true;
-            if trimmed.contains("*/") { in_block_comment = false; }
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
             continue;
         }
 
         // Skip single-line comments, empty lines, and pure attribute lines
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("///") || normalized.is_empty() {
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("///")
+            || normalized.is_empty()
+        {
             continue;
         }
 
@@ -1811,7 +1947,9 @@ fn parse_csharp_file(file_rel: &str, content: &str, store: &mut GraphStore) {
             match ch {
                 '"' if !in_chr => in_str = !in_str,
                 '\'' if !in_str => in_chr = !in_chr,
-                '\\' if in_str || in_chr => { chars.next(); }
+                '\\' if in_str || in_chr => {
+                    chars.next();
+                }
                 '{' if !in_str && !in_chr => depth += 1,
                 '}' if !in_str && !in_chr => {
                     depth -= 1;
@@ -1863,29 +2001,44 @@ fn strip_csharp_leading_attributes(line: &str) -> String {
 }
 
 fn is_csharp_method(line: &str) -> bool {
-    let has_modifier = line.starts_with("public ") || line.starts_with("private ")
-        || line.starts_with("protected ") || line.starts_with("internal ")
-        || line.starts_with("static ") || line.starts_with("override ")
-        || line.starts_with("virtual ") || line.starts_with("abstract ")
+    let has_modifier = line.starts_with("public ")
+        || line.starts_with("private ")
+        || line.starts_with("protected ")
+        || line.starts_with("internal ")
+        || line.starts_with("static ")
+        || line.starts_with("override ")
+        || line.starts_with("virtual ")
+        || line.starts_with("abstract ")
         || line.starts_with("async ");
 
-    has_modifier && line.contains('(')
-        && !line.contains("class ") && !line.contains("struct ")
-        && !line.contains("interface ") && !line.contains("delegate ")
-        && !line.contains("event ") && !line.contains("enum ")
+    has_modifier
+        && line.contains('(')
+        && !line.contains("class ")
+        && !line.contains("struct ")
+        && !line.contains("interface ")
+        && !line.contains("delegate ")
+        && !line.contains("event ")
+        && !line.contains("enum ")
 }
 
 fn extract_csharp_method_name(line: &str) -> Option<String> {
     let paren_idx = line.find('(')?;
     let before_paren = line[..paren_idx].trim_end();
-    let name = before_paren.rsplit(|c: char| c.is_whitespace() || c == '>' || c == ']')
+    let name = before_paren
+        .rsplit(|c: char| c.is_whitespace() || c == '>' || c == ']')
         .next()?
         .trim();
 
-    if name.is_empty() { return None; }
+    if name.is_empty() {
+        return None;
+    }
 
     let lower = name.to_lowercase();
-    if ["if", "for", "while", "switch", "catch", "using", "lock", "foreach", "new", "return"].contains(&lower.as_str()) {
+    if [
+        "if", "for", "while", "switch", "catch", "using", "lock", "foreach", "new", "return",
+    ]
+    .contains(&lower.as_str())
+    {
         return None;
     }
 
@@ -1893,21 +2046,29 @@ fn extract_csharp_method_name(line: &str) -> Option<String> {
 }
 
 fn is_csharp_field_or_property(line: &str) -> bool {
-    let has_modifier = line.starts_with("public ") || line.starts_with("private ")
-        || line.starts_with("protected ") || line.starts_with("internal ");
+    let has_modifier = line.starts_with("public ")
+        || line.starts_with("private ")
+        || line.starts_with("protected ")
+        || line.starts_with("internal ");
 
-    has_modifier && !line.contains('(')
-        && !line.contains("class ") && !line.contains("struct ")
-        && !line.contains("interface ") && !line.contains("delegate ")
-        && !line.contains("enum ") && !line.contains("event ")
+    has_modifier
+        && !line.contains('(')
+        && !line.contains("class ")
+        && !line.contains("struct ")
+        && !line.contains("interface ")
+        && !line.contains("delegate ")
+        && !line.contains("enum ")
+        && !line.contains("event ")
         && (line.contains(';') || line.contains('{') || line.contains('='))
 }
 
 fn extract_csharp_field_name(line: &str) -> Option<String> {
-    let end_idx = line.find(|c: char| c == ';' || c == '{' || c == '=')
+    let end_idx = line
+        .find(|c: char| c == ';' || c == '{' || c == '=')
         .unwrap_or(line.len());
     let before_end = line[..end_idx].trim_end();
-    let name = before_end.rsplit(|c: char| c.is_whitespace() || c == '>' || c == ']')
+    let name = before_end
+        .rsplit(|c: char| c.is_whitespace() || c == '>' || c == ']')
         .next()?
         .trim();
 
@@ -1950,13 +2111,27 @@ public class SocketManager : MonoBehaviour
         let mut store = GraphStore::new();
         parse_csharp_file("Assets/Test/SocketManager.cs", source, &mut store);
 
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::config"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::counter"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::Awake"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::ForceRefreshSockets"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::NestedData"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::NestedData::Value"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::config"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::counter"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::Awake"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::ForceRefreshSockets"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::NestedData"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::NestedData::Value"));
     }
 
     #[test]
@@ -2007,12 +2182,24 @@ namespace Demo.Interaction
         let mut store = GraphStore::new();
         parse_csharp_file("Assets/Test/SocketManager.cs", source, &mut store);
 
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::OnValidate"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::Awake"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::ForceRefreshSockets"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::SnapDistanceThreshold"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::SnapSurfaceSeparation"));
-        assert!(store.nodes.contains_key("Assets/Test/SocketManager.cs::SocketManager::RendererFadeState::RenderQueue"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::OnValidate"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::Awake"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::ForceRefreshSockets"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::SnapDistanceThreshold"));
+        assert!(store
+            .nodes
+            .contains_key("Assets/Test/SocketManager.cs::SocketManager::SnapSurfaceSeparation"));
+        assert!(store.nodes.contains_key(
+            "Assets/Test/SocketManager.cs::SocketManager::RendererFadeState::RenderQueue"
+        ));
     }
 }
 
@@ -2040,15 +2227,21 @@ fn parse_gdscript_file(file_rel: &str, content: &str, store: &mut GraphStore) {
             let name = caps[1].to_string();
             let id = format!("{}::{}", file_rel, name);
             store.add_node(GraphNode {
-                id: id.clone(), name, node_type: NodeType::Class,
-                asset_kind: None, file_path: Some(file_rel.to_string()),
-                line_number: Some(line_num), metadata: HashMap::new(),
+                id: id.clone(),
+                name,
+                node_type: NodeType::Class,
+                asset_kind: None,
+                file_path: Some(file_rel.to_string()),
+                line_number: Some(line_num),
+                metadata: HashMap::new(),
             });
             store.add_edge(GraphEdge {
-                source: file_rel.to_string(), target: id.clone(),
+                source: file_rel.to_string(),
+                target: id.clone(),
                 edge_type: EdgeType::Contains,
                 reference_class: ReferenceClass::Official,
-                label: None, evidence: None,
+                label: None,
+                evidence: None,
             });
             class_id = Some(id);
         } else if let Some(caps) = func_re.captures(trimmed) {
@@ -2056,30 +2249,42 @@ fn parse_gdscript_file(file_rel: &str, content: &str, store: &mut GraphStore) {
             let parent = class_id.as_deref().unwrap_or(file_rel);
             let id = format!("{}::{}", parent, name);
             store.add_node(GraphNode {
-                id: id.clone(), name, node_type: NodeType::Method,
-                asset_kind: None, file_path: Some(file_rel.to_string()),
-                line_number: Some(line_num), metadata: HashMap::new(),
+                id: id.clone(),
+                name,
+                node_type: NodeType::Method,
+                asset_kind: None,
+                file_path: Some(file_rel.to_string()),
+                line_number: Some(line_num),
+                metadata: HashMap::new(),
             });
             store.add_edge(GraphEdge {
-                source: parent.to_string(), target: id,
+                source: parent.to_string(),
+                target: id,
                 edge_type: EdgeType::Declares,
                 reference_class: ReferenceClass::Official,
-                label: None, evidence: None,
+                label: None,
+                evidence: None,
             });
         } else if let Some(caps) = var_re.captures(trimmed) {
             let name = caps[1].to_string();
             let parent = class_id.as_deref().unwrap_or(file_rel);
             let id = format!("{}::{}", parent, name);
             store.add_node(GraphNode {
-                id: id.clone(), name, node_type: NodeType::MemberVariable,
-                asset_kind: None, file_path: Some(file_rel.to_string()),
-                line_number: Some(line_num), metadata: HashMap::new(),
+                id: id.clone(),
+                name,
+                node_type: NodeType::MemberVariable,
+                asset_kind: None,
+                file_path: Some(file_rel.to_string()),
+                line_number: Some(line_num),
+                metadata: HashMap::new(),
             });
             store.add_edge(GraphEdge {
-                source: parent.to_string(), target: id,
+                source: parent.to_string(),
+                target: id,
                 edge_type: EdgeType::Declares,
                 reference_class: ReferenceClass::Official,
-                label: None, evidence: None,
+                label: None,
+                evidence: None,
             });
         }
     }

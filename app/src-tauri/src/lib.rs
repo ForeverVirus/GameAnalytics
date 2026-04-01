@@ -25,6 +25,7 @@ pub fn run() {
             commands::get_hardcode_findings,
             commands::save_settings,
             commands::load_settings,
+            commands::detect_ai_clis,
             commands::open_file_location,
             commands::read_image_base64,
             commands::run_ai_analysis,

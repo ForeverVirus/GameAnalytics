@@ -76,6 +76,11 @@ export interface AppSettings {
   ai_thinking?: string | null;
 }
 
+export interface CliStatus {
+  available: boolean;
+  resolved_path: string | null;
+}
+
 export const api = {
   selectProject: (path: string) =>
     invoke<ProjectInfo>('select_project', { path }),
@@ -112,6 +117,9 @@ export const api = {
 
   loadSettings: () =>
     invoke<AppSettings>('load_settings'),
+
+  detectAiClis: () =>
+    invoke<Record<string, CliStatus>>('detect_ai_clis'),
 
   openFileLocation: (filePath: string, projectPath: string) =>
     invoke<void>('open_file_location', { filePath, projectPath }),
