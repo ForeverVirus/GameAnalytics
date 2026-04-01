@@ -1,6 +1,16 @@
 import { create } from 'zustand';
-import { api, ProjectInfo, AnalysisStats, FrontendGraph, SuspectedReference, HardcodeFinding, AppSettings, listenProgress, listenAiLog } from '../api/tauri';
+import { api, ProjectInfo, AnalysisStats, FrontendGraph, SuspectedReference, HardcodeFinding, AppSettings, listenProgress, listenAiLog, listenProfilerFrame, listenProfilerAutoStop, OrphanReport, DuplicateGroup, HotspotReport, AssetMetricsData, ReviewResult, ProfilerFrame, SessionMeta, ProfilerReport, DeepAnalysisReport, ComparisonResult, UnityStatus } from '../api/tauri';
 import type { UnlistenFn } from '@tauri-apps/api/event';
+
+let profilerFrameUnlisten: UnlistenFn | null = null;
+let profilerAutoStopUnlisten: UnlistenFn | null = null;
+
+function clearProfilerListeners() {
+  profilerFrameUnlisten?.();
+  profilerAutoStopUnlisten?.();
+  profilerFrameUnlisten = null;
+  profilerAutoStopUnlisten = null;
+}
 
 interface AppStore {
   // Project state
@@ -57,6 +67,60 @@ interface AppStore {
   startFullPipeline: (path: string, forceRefresh?: boolean) => Promise<void>;
   exportAnalysis: () => Promise<string | null>;
   dismissProgress: () => void;
+
+  // V2: Redundancy
+  orphans: OrphanReport[];
+  duplicates: DuplicateGroup[];
+  hotspots: HotspotReport[];
+  loadOrphans: () => Promise<void>;
+  loadDuplicates: () => Promise<void>;
+  loadHotspots: (threshold?: number) => Promise<void>;
+
+  // V2: Asset Metrics
+  assetMetrics: AssetMetricsData[];
+  loadAssetMetrics: () => Promise<void>;
+
+  // V2: Code Review
+  reviewResults: ReviewResult[];
+  reviewLoading: boolean;
+  runCodeReview: (nodeId: string, reviewType: string) => Promise<void>;
+  runProjectCodeReview: (reviewType: string) => Promise<void>;
+  clearReviewResults: () => void;
+
+  // V2: Asset Review
+  assetReviewResult: ReviewResult | null;
+  assetReviewLoading: boolean;
+  runAssetReview: () => Promise<void>;
+
+  // V3: Profiler
+  unityStatus: UnityStatus;
+  profiling: boolean;
+  liveFrames: ProfilerFrame[];
+  profilerSessions: SessionMeta[];
+  currentReport: ProfilerReport | null;
+  currentDeepReport: DeepAnalysisReport | null;
+  comparisonResult: ComparisonResult | null;
+  profilerTab: string;
+  profilerLoading: boolean;
+  selectedProfilerSessionId: string | null;
+
+  discoverUnity: () => Promise<number>;
+  connectUnity: (port: number) => Promise<boolean>;
+  disconnectUnity: () => Promise<void>;
+  refreshUnityStatus: () => Promise<void>;
+  startProfiling: (sessionName: string) => Promise<string>;
+  stopProfiling: () => Promise<SessionMeta | null>;
+  loadProfilerSessions: () => Promise<void>;
+  deleteProfilerSession: (sessionId: string) => Promise<void>;
+  renameProfilerSession: (sessionId: string, newName: string) => Promise<void>;
+  generateProfilerReport: (sessionId: string) => Promise<void>;
+  generateDeepAnalysis: (sessionId: string, filePaths: string[]) => Promise<void>;
+  compareProfilerSessions: (sessionAId: string, sessionBId: string) => Promise<void>;
+  exportProfilerReport: (sessionId: string) => Promise<string | null>;
+  exportComparison: () => Promise<string | null>;
+  setProfilerTab: (tab: string) => void;
+  setSelectedProfilerSessionId: (sessionId: string | null) => void;
+  clearProfilerReport: () => void;
 }
 
 export const useAppStore = create<AppStore>((set, get) => ({
@@ -362,4 +426,332 @@ export const useAppStore = create<AppStore>((set, get) => ({
     progressDone: false,
     aiLogs: [],
   }),
+
+  // V2: Redundancy
+  orphans: [],
+  duplicates: [],
+  hotspots: [],
+  loadOrphans: async () => {
+    try {
+      const orphans = await api.getOrphanNodes();
+      set({ orphans });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+  loadDuplicates: async () => {
+    try {
+      const duplicates = await api.getDuplicateResources();
+      set({ duplicates });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+  loadHotspots: async (threshold?: number) => {
+    try {
+      const hotspots = await api.getHotspots(threshold);
+      set({ hotspots });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  // V2: Asset Metrics
+  assetMetrics: [],
+  loadAssetMetrics: async () => {
+    try {
+      const assetMetrics = await api.getAssetMetrics();
+      set({ assetMetrics });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  // V2: Code Review
+  reviewResults: [],
+  reviewLoading: false,
+  runCodeReview: async (nodeId: string, reviewType: string) => {
+    const { settings } = get();
+    set({ reviewLoading: true, aiLiveLog: [], error: null });
+    let unlistenLog: UnlistenFn | null = null;
+    try {
+      unlistenLog = await listenAiLog((line) => {
+        set((s) => ({ aiLiveLog: [...s.aiLiveLog, line] }));
+      });
+      const result = await api.runAiCodeReview(
+        nodeId,
+        reviewType,
+        settings.language,
+        settings.ai_cli,
+        settings.ai_model,
+        settings.ai_thinking
+      );
+      set((s) => ({
+        reviewResults: [...s.reviewResults, result],
+        reviewLoading: false,
+        error: null,
+      }));
+    } catch (e) {
+      set({ error: String(e), reviewLoading: false });
+    } finally {
+      unlistenLog?.();
+    }
+  },
+  runProjectCodeReview: async (reviewType: string) => {
+    const { settings } = get();
+    set({ reviewLoading: true, aiLiveLog: [], error: null });
+    let unlistenLog: UnlistenFn | null = null;
+    try {
+      unlistenLog = await listenAiLog((line) => {
+        set((s) => ({ aiLiveLog: [...s.aiLiveLog, line] }));
+      });
+      const results = await api.runAiProjectCodeReview(
+        reviewType,
+        settings.language,
+        settings.ai_cli,
+        settings.ai_model,
+        settings.ai_thinking
+      );
+      set((s) => ({
+        reviewResults: [...s.reviewResults, ...results],
+        reviewLoading: false,
+        error: null,
+      }));
+    } catch (e) {
+      set({ error: String(e), reviewLoading: false });
+    } finally {
+      unlistenLog?.();
+    }
+  },
+  clearReviewResults: () => set({ reviewResults: [] }),
+
+  // V2: Asset Review
+  assetReviewResult: null,
+  assetReviewLoading: false,
+  runAssetReview: async () => {
+    const { settings } = get();
+    set({ assetReviewLoading: true, aiLiveLog: [], error: null });
+    let unlistenLog: UnlistenFn | null = null;
+    try {
+      unlistenLog = await listenAiLog((line) => {
+        set((s) => ({ aiLiveLog: [...s.aiLiveLog, line] }));
+      });
+      const result = await api.runAiAssetReview(
+        settings.language,
+        settings.ai_cli,
+        settings.ai_model,
+        settings.ai_thinking
+      );
+      set({ assetReviewResult: result, assetReviewLoading: false, error: null });
+    } catch (e) {
+      set({ error: String(e), assetReviewLoading: false });
+    } finally {
+      unlistenLog?.();
+    }
+  },
+
+  // V3: Profiler
+  unityStatus: { connected: false, port: null, editor_state: null, profiling: false },
+  profiling: false,
+  liveFrames: [],
+  profilerSessions: [],
+  currentReport: null,
+  currentDeepReport: null,
+  comparisonResult: null,
+  profilerTab: 'live',
+  profilerLoading: false,
+  selectedProfilerSessionId: null,
+
+  discoverUnity: async () => {
+    const port = await api.discoverUnity();
+    return port;
+  },
+
+  connectUnity: async (port: number) => {
+    const ok = await api.connectUnity(port);
+    if (ok) {
+      const status = await api.getUnityStatus();
+      set({ unityStatus: status, profiling: status.profiling });
+    }
+    return ok;
+  },
+
+  disconnectUnity: async () => {
+    if (get().profiling) {
+      await get().stopProfiling();
+    }
+    clearProfilerListeners();
+    await api.disconnectUnity();
+    set({
+      profiling: false,
+      unityStatus: { connected: false, port: null, editor_state: null, profiling: false }
+    });
+  },
+
+  refreshUnityStatus: async () => {
+    try {
+      const status = await api.getUnityStatus();
+      set({ unityStatus: status, profiling: status.profiling });
+    } catch {
+      set({ profiling: false, unityStatus: { connected: false, port: null, editor_state: null, profiling: false } });
+    }
+  },
+
+  startProfiling: async (sessionName: string) => {
+    clearProfilerListeners();
+    set((s) => ({
+      profiling: true,
+      liveFrames: [],
+      error: null,
+      unityStatus: { ...s.unityStatus, profiling: true }
+    }));
+    try {
+      profilerFrameUnlisten = await listenProfilerFrame((frame) => {
+        set((s) => {
+          const frames = [...s.liveFrames, frame];
+          // Keep rolling window of 600 frames (~5 min at 2Hz)
+          if (frames.length > 600) frames.shift();
+          return { liveFrames: frames };
+        });
+      });
+      profilerAutoStopUnlisten = await listenProfilerAutoStop(() => {
+        clearProfilerListeners();
+        void get().stopProfiling();
+      });
+      const sessionId = await api.startProfiling(sessionName);
+      return sessionId;
+    } catch (e) {
+      clearProfilerListeners();
+      set((s) => ({
+        profiling: false,
+        error: String(e),
+        unityStatus: { ...s.unityStatus, profiling: false }
+      }));
+      await get().refreshUnityStatus();
+      throw e;
+    }
+  },
+
+  stopProfiling: async () => {
+    clearProfilerListeners();
+    try {
+      const meta = await api.stopProfiling();
+      set((s) => ({
+        profiling: false,
+        error: null,
+        selectedProfilerSessionId: meta.id,
+        unityStatus: { ...s.unityStatus, profiling: false }
+      }));
+      await get().loadProfilerSessions();
+      await get().refreshUnityStatus();
+      return meta;
+    } catch (e) {
+      set((s) => ({
+        profiling: false,
+        error: String(e),
+        unityStatus: { ...s.unityStatus, profiling: false }
+      }));
+      return null;
+    }
+  },
+
+  loadProfilerSessions: async () => {
+    try {
+      const sessions = await api.listProfilerSessions();
+      set({ profilerSessions: sessions });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  deleteProfilerSession: async (sessionId: string) => {
+    try {
+      await api.deleteProfilerSession(sessionId);
+      await get().loadProfilerSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  renameProfilerSession: async (sessionId: string, newName: string) => {
+    try {
+      await api.renameProfilerSession(sessionId, newName);
+      await get().loadProfilerSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  generateProfilerReport: async (sessionId: string) => {
+    const { settings } = get();
+    set({ profilerLoading: true, currentReport: null, aiLiveLog: [], error: null, selectedProfilerSessionId: sessionId });
+    let unlistenLog: UnlistenFn | null = null;
+    try {
+      unlistenLog = await listenAiLog((line) => {
+        set((s) => ({ aiLiveLog: [...s.aiLiveLog, line] }));
+      });
+      const report = await api.generateProfilerReport(sessionId, settings.ai_cli, settings.ai_model, settings.ai_thinking);
+      set({ currentReport: report, profilerLoading: false, error: null });
+    } catch (e) {
+      set({ error: String(e), profilerLoading: false });
+    } finally {
+      unlistenLog?.();
+    }
+  },
+
+  generateDeepAnalysis: async (sessionId: string, filePaths: string[]) => {
+    const { settings } = get();
+    set({ profilerLoading: true, currentDeepReport: null, aiLiveLog: [], error: null, selectedProfilerSessionId: sessionId });
+    let unlistenLog: UnlistenFn | null = null;
+    try {
+      unlistenLog = await listenAiLog((line) => {
+        set((s) => ({ aiLiveLog: [...s.aiLiveLog, line] }));
+      });
+      const report = await api.generateDeepProfilerAnalysis(sessionId, filePaths, settings.ai_cli, settings.ai_model, settings.ai_thinking);
+      set({ currentDeepReport: report, profilerLoading: false, error: null });
+    } catch (e) {
+      set({ error: String(e), profilerLoading: false });
+    } finally {
+      unlistenLog?.();
+    }
+  },
+
+  compareProfilerSessions: async (sessionAId: string, sessionBId: string) => {
+    set({ profilerLoading: true, comparisonResult: null });
+    try {
+      const result = await api.compareProfilerSessions(sessionAId, sessionBId);
+      set({ comparisonResult: result, profilerLoading: false });
+    } catch (e) {
+      set({ error: String(e), profilerLoading: false });
+    }
+  },
+
+  exportProfilerReport: async (sessionId: string) => {
+    const { currentReport } = get();
+    if (!currentReport) return null;
+    try {
+      const path = await api.exportProfilerReport(sessionId, currentReport);
+      return path;
+    } catch (e) {
+      set({ error: String(e) });
+      return null;
+    }
+  },
+
+  exportComparison: async () => {
+    const { comparisonResult } = get();
+    if (!comparisonResult) return null;
+    try {
+      const path = await api.exportProfilerComparison(comparisonResult);
+      return path;
+    } catch (e) {
+      set({ error: String(e) });
+      return null;
+    }
+  },
+
+  setProfilerTab: (tab: string) => set({ profilerTab: tab }),
+  setSelectedProfilerSessionId: (sessionId) => set({ selectedProfilerSessionId: sessionId }),
+
+  clearProfilerReport: () => set({ currentReport: null, currentDeepReport: null, comparisonResult: null }),
 }));

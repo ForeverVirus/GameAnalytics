@@ -12,6 +12,8 @@ export default function TopBar() {
 
   const navItems = [
     { to: '/overview', label: t('nav.overview') },
+    { to: '/performance', label: t('nav.performance', '性能分析') },
+    { to: '/redundancy', label: t('nav.redundancy', '冗余资源') },
     { to: '/asset', label: t('nav.asset') },
     { to: '/code', label: t('nav.code') },
     { to: '/suspected', label: t('nav.suspected') },

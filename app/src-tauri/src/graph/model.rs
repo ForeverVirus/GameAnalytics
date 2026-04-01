@@ -195,3 +195,120 @@ impl Default for AppSettings {
         }
     }
 }
+
+// ======================== V2: Redundancy Detection ========================
+
+/// An orphaned node with no references
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanReport {
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub node_type: NodeType,
+    pub asset_kind: Option<AssetKind>,
+    pub file_path: Option<String>,
+    pub file_size_bytes: u64,
+    pub suggestion: String,
+}
+
+/// A group of duplicate or similar files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub group_id: String,
+    pub asset_kind: Option<AssetKind>,
+    pub files: Vec<DuplicateItem>,
+    pub total_size: u64,
+    pub similarity: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateItem {
+    pub node_id: NodeId,
+    pub file_path: String,
+    pub file_size: u64,
+    pub hash: Option<String>,
+}
+
+/// A hotspot node with too many dependents
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotspotReport {
+    pub node_id: NodeId,
+    pub node_name: String,
+    pub node_type: NodeType,
+    pub file_path: Option<String>,
+    pub in_degree: u32,
+    pub dependents: Vec<NodeId>,
+    pub risk_level: RiskLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RiskLevel {
+    High,
+    Medium,
+    Low,
+}
+
+// ======================== V2: Asset Metrics ========================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetMetrics {
+    pub node_id: NodeId,
+    pub file_path: String,
+    pub file_size_bytes: u64,
+    // Texture metrics
+    pub texture_width: Option<u32>,
+    pub texture_height: Option<u32>,
+    pub texture_format: Option<String>,
+    pub estimated_memory_bytes: Option<u64>,
+    pub has_mipmaps: Option<bool>,
+    // Model metrics
+    pub vertex_count: Option<u32>,
+    pub triangle_count: Option<u32>,
+    pub submesh_count: Option<u32>,
+    // Audio metrics
+    pub sample_rate: Option<u32>,
+    pub duration_seconds: Option<f32>,
+    pub channels: Option<u32>,
+    // Rating
+    pub performance_rating: Option<String>,
+    pub ai_optimization_suggestion: Option<String>,
+}
+
+// ======================== V2: AI Code Review ========================
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReviewType {
+    Line,
+    Architecture,
+    Performance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReviewSeverity {
+    Critical,
+    Warning,
+    Info,
+    Suggestion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    pub id: String,
+    pub review_type: ReviewType,
+    pub file_path: String,
+    pub line_number: Option<u32>,
+    pub line_end: Option<u32>,
+    pub severity: ReviewSeverity,
+    pub category: String,
+    pub message: String,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewResult {
+    pub node_id: NodeId,
+    pub review_type: ReviewType,
+    pub findings: Vec<ReviewFinding>,
+    pub summary: String,
+    pub timestamp: String,
+    pub raw_response: String,
+}

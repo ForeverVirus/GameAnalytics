@@ -1,4 +1,5 @@
 use regex::Regex;
+use sha2::{Sha256, Digest};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
@@ -2288,4 +2289,180 @@ fn parse_gdscript_file(file_rel: &str, content: &str, store: &mut GraphStore) {
             });
         }
     }
+}
+
+// ======================== V2: Redundancy Detection ========================
+
+/// Detect orphan nodes — files with zero in-degree and zero out-degree (no references at all)
+pub fn detect_orphan_nodes(
+    store: &GraphStore,
+    project_root: &Path,
+) -> Vec<OrphanReport> {
+    let mut in_degree: HashMap<&str, u32> = HashMap::new();
+    let mut out_degree: HashMap<&str, u32> = HashMap::new();
+
+    for edge in &store.edges {
+        // Only count non-Contains/Declares edges (structural edges don't indicate usage)
+        if matches!(edge.edge_type, EdgeType::Contains | EdgeType::Declares) {
+            continue;
+        }
+        *in_degree.entry(edge.target.as_str()).or_insert(0) += 1;
+        *out_degree.entry(edge.source.as_str()).or_insert(0) += 1;
+    }
+
+    let mut orphans = Vec::new();
+
+    for node in store.nodes.values() {
+        // Only check leaf-level nodes (files), skip directories and structural nodes
+        if matches!(node.node_type, NodeType::Directory | NodeType::Class | NodeType::Method | NodeType::MemberVariable | NodeType::Interface | NodeType::Module) {
+            continue;
+        }
+
+        let in_d = in_degree.get(node.id.as_str()).copied().unwrap_or(0);
+        let out_d = out_degree.get(node.id.as_str()).copied().unwrap_or(0);
+
+        if in_d == 0 && out_d == 0 {
+            let file_size = node.file_path.as_ref()
+                .map(|fp| {
+                    let full = project_root.join(fp.replace('/', std::path::MAIN_SEPARATOR_STR));
+                    fs::metadata(&full).map(|m| m.len()).unwrap_or(0)
+                })
+                .unwrap_or(0);
+
+            let suggestion = match node.node_type {
+                NodeType::Asset => "未被任何文件引用的资源，考虑删除以减小包体".to_string(),
+                NodeType::CodeFile => "未被引用的代码文件，可能为死代码".to_string(),
+                _ => "孤立节点，无引用关系".to_string(),
+            };
+
+            orphans.push(OrphanReport {
+                node_id: node.id.clone(),
+                node_name: node.name.clone(),
+                node_type: node.node_type.clone(),
+                asset_kind: node.asset_kind.clone(),
+                file_path: node.file_path.clone(),
+                file_size_bytes: file_size,
+                suggestion,
+            });
+        }
+    }
+
+    orphans.sort_by(|a, b| b.file_size_bytes.cmp(&a.file_size_bytes));
+    orphans
+}
+
+/// Detect duplicate files by size + SHA256 hash
+pub fn detect_duplicates(
+    store: &GraphStore,
+    project_root: &Path,
+) -> Vec<DuplicateGroup> {
+    // Group asset/code file nodes by file size
+    let mut size_groups: HashMap<u64, Vec<(&GraphNode, String)>> = HashMap::new();
+
+    for node in store.nodes.values() {
+        if !matches!(node.node_type, NodeType::Asset | NodeType::CodeFile) {
+            continue;
+        }
+        let Some(fp) = &node.file_path else { continue };
+        let full = project_root.join(fp.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let size = match fs::metadata(&full) {
+            Ok(m) => m.len(),
+            Err(_) => continue,
+        };
+        if size == 0 { continue; }
+        size_groups.entry(size).or_default().push((node, full.to_string_lossy().to_string()));
+    }
+
+    let mut groups = Vec::new();
+    let mut group_id = 0u32;
+
+    for (size, candidates) in &size_groups {
+        if candidates.len() < 2 { continue; }
+
+        // Compute SHA256 for each file in this size group
+        let mut hash_groups: HashMap<String, Vec<&GraphNode>> = HashMap::new();
+        for (node, full_path) in candidates {
+            let hash = match fs::read(full_path) {
+                Ok(data) => {
+                    let mut hasher = Sha256::new();
+                    hasher.update(&data);
+                    format!("{:x}", hasher.finalize())
+                },
+                Err(_) => continue,
+            };
+            hash_groups.entry(hash).or_default().push(node);
+        }
+
+        for (hash, nodes) in &hash_groups {
+            if nodes.len() < 2 { continue; }
+            group_id += 1;
+
+            let items: Vec<DuplicateItem> = nodes.iter().map(|n| DuplicateItem {
+                node_id: n.id.clone(),
+                file_path: n.file_path.clone().unwrap_or_default(),
+                file_size: *size,
+                hash: Some(hash.clone()),
+            }).collect();
+
+            let total_size = *size * items.len() as u64;
+
+            groups.push(DuplicateGroup {
+                group_id: format!("dup_{}", group_id),
+                asset_kind: nodes[0].asset_kind.clone(),
+                files: items,
+                total_size,
+                similarity: 1.0,
+            });
+        }
+    }
+
+    groups.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    groups
+}
+
+/// Detect hotspot nodes with high in-degree (many dependents)
+pub fn detect_hotspots(
+    store: &GraphStore,
+    threshold: u32,
+) -> Vec<HotspotReport> {
+    let mut in_degree: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for edge in &store.edges {
+        if matches!(edge.edge_type, EdgeType::Contains | EdgeType::Declares) {
+            continue;
+        }
+        in_degree.entry(edge.target.as_str())
+            .or_default()
+            .push(edge.source.as_str());
+    }
+
+    let mut hotspots = Vec::new();
+
+    for (node_id, dependents) in &in_degree {
+        let count = dependents.len() as u32;
+        if count < threshold { continue; }
+
+        let Some(node) = store.nodes.get(*node_id) else { continue };
+
+        let risk_level = if count >= threshold * 3 {
+            RiskLevel::High
+        } else if count >= threshold * 2 {
+            RiskLevel::Medium
+        } else {
+            RiskLevel::Low
+        };
+
+        hotspots.push(HotspotReport {
+            node_id: node.id.clone(),
+            node_name: node.name.clone(),
+            node_type: node.node_type.clone(),
+            file_path: node.file_path.clone(),
+            in_degree: count,
+            dependents: dependents.iter().map(|s| s.to_string()).collect(),
+            risk_level,
+        });
+    }
+
+    hotspots.sort_by(|a, b| b.in_degree.cmp(&a.in_degree));
+    hotspots
 }

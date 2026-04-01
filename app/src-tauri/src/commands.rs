@@ -9,8 +9,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 use crate::analysis;
+use crate::asset_metrics;
+use crate::ai_review;
 use crate::graph::model::*;
 use crate::graph::store::{FrontendGraph, GraphStore};
+use crate::profiler_report;
+use crate::profiler_session;
+use crate::unity_connection;
 use crate::workspace;
 
 #[cfg(target_os = "windows")]
@@ -20,6 +25,8 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub struct AppState {
     pub project: Mutex<Option<workspace::ProjectInfo>>,
     pub graph: Mutex<GraphStore>,
+    pub unity_port: Mutex<Option<u16>>,
+    pub profiler: profiler_session::ProfilerManager,
 }
 
 impl Default for AppState {
@@ -27,6 +34,8 @@ impl Default for AppState {
         Self {
             project: Mutex::new(None),
             graph: Mutex::new(GraphStore::new()),
+            unity_port: Mutex::new(None),
+            profiler: profiler_session::ProfilerManager::default(),
         }
     }
 }
@@ -2416,4 +2425,773 @@ pub fn export_analysis(
 
     let export_path = export_dir.to_string_lossy().to_string();
     Ok(export_path)
+}
+
+// ======================== V2: Redundancy Commands ========================
+
+#[tauri::command]
+pub fn get_orphan_nodes(
+    state: State<'_, AppState>,
+) -> Result<Vec<OrphanReport>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let project = state.project.lock().map_err(|e| e.to_string())?;
+    let project_path = project.as_ref()
+        .map(|p| PathBuf::from(&p.path))
+        .ok_or("未打开项目")?;
+
+    Ok(analysis::detect_orphan_nodes(&graph, &project_path))
+}
+
+#[tauri::command]
+pub fn get_duplicate_resources(
+    state: State<'_, AppState>,
+) -> Result<Vec<DuplicateGroup>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let project = state.project.lock().map_err(|e| e.to_string())?;
+    let project_path = project.as_ref()
+        .map(|p| PathBuf::from(&p.path))
+        .ok_or("未打开项目")?;
+
+    Ok(analysis::detect_duplicates(&graph, &project_path))
+}
+
+#[tauri::command]
+pub fn get_hotspots(
+    threshold: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<HotspotReport>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let t = threshold.unwrap_or(5);
+    Ok(analysis::detect_hotspots(&graph, t))
+}
+
+// ======================== V2: Asset Metrics Commands ========================
+
+#[tauri::command]
+pub fn get_asset_metrics(
+    state: State<'_, AppState>,
+) -> Result<Vec<AssetMetrics>, String> {
+    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let project = state.project.lock().map_err(|e| e.to_string())?;
+    let project_path = project.as_ref()
+        .map(|p| PathBuf::from(&p.path))
+        .ok_or("未打开项目")?;
+
+    Ok(asset_metrics::collect_asset_metrics(&graph, &project_path))
+}
+
+// ======================== V2: AI Review Commands ========================
+
+fn parse_review_type(review_type: &str) -> Result<ReviewType, String> {
+    match review_type {
+        "line" => Ok(ReviewType::Line),
+        "architecture" => Ok(ReviewType::Architecture),
+        "performance" => Ok(ReviewType::Performance),
+        _ => Err(format!("不支持的审查类型: {}", review_type)),
+    }
+}
+
+fn build_code_review_request(
+    graph: &GraphStore,
+    project_path: &str,
+    node_id: &str,
+    review_type: &str,
+    response_language: &str,
+) -> Result<(String, String, String, ReviewType), String> {
+    let node = graph
+        .nodes
+        .get(node_id)
+        .ok_or_else(|| format!("节点未找到: {}", node_id))?;
+    let fp = node.file_path.clone().ok_or("节点没有文件路径")?;
+
+    let full_path =
+        std::path::Path::new(project_path).join(fp.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let content = std::fs::read_to_string(&full_path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let lang = ai_review::detect_language(&fp);
+    let rt = parse_review_type(review_type)?;
+
+    let prompt = match rt {
+        ReviewType::Line => {
+            ai_review::build_line_review_prompt(&fp, &content, lang, response_language)
+        }
+        ReviewType::Architecture => {
+            let upstream: Vec<String> = graph
+                .get_upstream(node_id)
+                .iter()
+                .filter_map(|e| graph.nodes.get(&e.source))
+                .filter_map(|n| n.file_path.clone())
+                .collect();
+            let downstream: Vec<String> = graph
+                .get_downstream(node_id)
+                .iter()
+                .filter_map(|e| graph.nodes.get(&e.target))
+                .filter_map(|n| n.file_path.clone())
+                .collect();
+            ai_review::build_arch_review_prompt(
+                &fp,
+                &content,
+                &upstream,
+                &downstream,
+                lang,
+                response_language,
+            )
+        }
+        ReviewType::Performance => {
+            ai_review::build_perf_review_prompt(&fp, &content, lang, response_language)
+        }
+    };
+
+    Ok((prompt, fp, node_id.to_string(), rt))
+}
+
+async fn execute_code_review_request(
+    cli_name: &str,
+    model: &Option<String>,
+    thinking: &Option<String>,
+    prompt: String,
+    file_path: String,
+    target_node_id: String,
+    review_type: ReviewType,
+    response_language: &str,
+    app: &tauri::AppHandle,
+) -> Result<ReviewResult, String> {
+    let runtime_dir = build_ai_runtime_dir()?;
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" {
+        Some(runtime_dir_str.as_str())
+    } else {
+        None
+    };
+    let invocation = build_cli_invocation(cli_name, &prompt, model, thinking, codex_cd)?;
+
+    emit_ai_log(
+        app,
+        &format!(
+            "[代码审查] 类型: {:?} | 节点: {}",
+            review_type, target_node_id
+        ),
+    );
+    emit_ai_log(
+        app,
+        &format!("  CLI: {} | prompt长度: {} 字符", cli_name, prompt.len()),
+    );
+
+    let raw = run_cli_streaming(cli_name, &invocation, app, &runtime_dir.to_string_lossy())
+        .await
+        .map_err(|e| {
+            emit_ai_log(app, &format!("[审查错误] {}", e));
+            e
+        })?;
+
+    if raw.trim().is_empty() {
+        let err = "AI CLI 返回了空结果".to_string();
+        emit_ai_log(app, &format!("[审查错误] {}", err));
+        return Err(err);
+    }
+
+    emit_ai_log(app, &format!("[审查完成] 响应长度: {} 字符", raw.len()));
+
+    Ok(ai_review::parse_review_response(
+        &raw,
+        review_type,
+        &file_path,
+        &target_node_id,
+        response_language,
+    ))
+}
+
+#[tauri::command]
+pub async fn run_ai_code_review(
+    node_id: String,
+    review_type: String,
+    response_language: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ReviewResult, String> {
+    let (prompt, file_path, target_node_id, rt) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let project = state.project.lock().map_err(|e| e.to_string())?;
+        let project_path = project.as_ref().map(|p| p.path.clone()).unwrap_or_default();
+        build_code_review_request(
+            &graph,
+            &project_path,
+            &node_id,
+            &review_type,
+            &response_language,
+        )?
+    };
+
+    execute_code_review_request(
+        &cli_name,
+        &model,
+        &thinking,
+        prompt,
+        file_path,
+        target_node_id,
+        rt,
+        &response_language,
+        &app,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn run_ai_project_code_review(
+    review_type: String,
+    response_language: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ReviewResult>, String> {
+    let (graph, project_path, mut code_file_ids) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
+        let project = state.project.lock().map_err(|e| e.to_string())?;
+        let project_path = project
+            .as_ref()
+            .map(|p| p.path.clone())
+            .ok_or("未打开项目")?;
+        let mut code_file_ids: Vec<String> = graph
+            .nodes
+            .values()
+            .filter(|n| n.node_type == NodeType::CodeFile)
+            .map(|n| n.id.clone())
+            .collect();
+        code_file_ids.sort();
+        (graph, project_path, code_file_ids)
+    };
+
+    if code_file_ids.is_empty() {
+        return Err("当前项目没有可审查的代码文件".to_string());
+    }
+
+    emit_ai_log(
+        &app,
+        &format!(
+            "[全量代码审查] 类型: {} | 文件数: {}",
+            review_type,
+            code_file_ids.len()
+        ),
+    );
+
+    let total = code_file_ids.len();
+    let mut results = Vec::new();
+    let mut failed = 0usize;
+
+    for (idx, file_node_id) in code_file_ids.drain(..).enumerate() {
+        emit_ai_log(
+            &app,
+            &format!("[全量代码审查] 进度 {}/{}: {}", idx + 1, total, file_node_id),
+        );
+
+        let (prompt, file_path, target_node_id, rt) = match build_code_review_request(
+            &graph,
+            &project_path,
+            &file_node_id,
+            &review_type,
+            &response_language,
+        ) {
+            Ok(req) => req,
+            Err(err) => {
+                failed += 1;
+                emit_ai_log(&app, &format!("[全量代码审查] 跳过 {}: {}", file_node_id, err));
+                continue;
+            }
+        };
+
+        match execute_code_review_request(
+            &cli_name,
+            &model,
+            &thinking,
+            prompt,
+            file_path,
+            target_node_id,
+            rt,
+            &response_language,
+            &app,
+        )
+        .await
+        {
+            Ok(result) => results.push(result),
+            Err(err) => {
+                failed += 1;
+                emit_ai_log(
+                    &app,
+                    &format!("[全量代码审查] 文件失败 {}: {}", file_node_id, err),
+                );
+            }
+        }
+    }
+
+    emit_ai_log(
+        &app,
+        &format!(
+            "[全量代码审查] 完成，成功 {} 个，失败 {} 个",
+            results.len(),
+            failed
+        ),
+    );
+
+    if results.is_empty() {
+        Err("全量代码审查未生成任何结果，请检查 AI CLI 输出".to_string())
+    } else {
+        Ok(results)
+    }
+}
+
+#[tauri::command]
+pub async fn run_ai_asset_review(
+    response_language: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ReviewResult, String> {
+    let (prompt, runtime_dir) = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        let project = state.project.lock().map_err(|e| e.to_string())?;
+        let project_path = project.as_ref()
+            .map(|p| PathBuf::from(&p.path))
+            .ok_or("未打开项目")?;
+
+        let metrics = asset_metrics::collect_asset_metrics(&graph, &project_path);
+        // Only send metrics with issues (poor/fair rating) to keep prompt size down
+        let problem_metrics: Vec<&AssetMetrics> = metrics.iter()
+            .filter(|m| {
+                matches!(m.performance_rating.as_deref(), Some("poor") | Some("fair"))
+            })
+            .take(50)
+            .collect();
+
+        let metrics_json = serde_json::to_string_pretty(&problem_metrics)
+            .map_err(|e| e.to_string())?;
+        let prompt = ai_review::build_asset_optimization_prompt(&metrics_json, &response_language);
+        let workdir = build_ai_runtime_dir()?;
+        (prompt, workdir)
+    };
+
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" {
+        Some(runtime_dir_str.as_str())
+    } else {
+        None
+    };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    emit_ai_log(&app, &format!("[资源优化审查] CLI: {} | prompt长度: {} 字符", cli_name, prompt.len()));
+
+    let raw = run_cli_streaming(
+        &cli_name,
+        &invocation,
+        &app,
+        &runtime_dir.to_string_lossy(),
+    )
+    .await
+    .map_err(|e| {
+        emit_ai_log(&app, &format!("[资源审查错误] {}", e));
+        e
+    })?;
+
+    if raw.trim().is_empty() {
+        let err = "AI CLI 返回了空结果".to_string();
+        emit_ai_log(&app, &format!("[资源审查错误] {}", err));
+        return Err(err);
+    }
+
+    emit_ai_log(&app, &format!("[资源审查完成] 响应长度: {} 字符", raw.len()));
+
+    Ok(ai_review::parse_review_response(
+        &raw,
+        ReviewType::Line,
+        "",
+        "asset_review",
+        &response_language,
+    ))
+}
+
+// ======================== Profiler Commands ========================
+
+#[tauri::command]
+pub async fn discover_unity() -> Result<u16, String> {
+    unity_connection::discover_unity().await
+}
+
+#[tauri::command]
+pub async fn connect_unity(
+    port: u16,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let alive = unity_connection::check_connection(port).await;
+    if alive {
+        if let Ok(mut p) = state.unity_port.lock() {
+            *p = Some(port);
+        }
+    }
+    Ok(alive)
+}
+
+#[tauri::command]
+pub async fn get_unity_status(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let port = {
+        state.unity_port.lock().map_err(|e| e.to_string())?.clone()
+    };
+    match port {
+        Some(p) => {
+            let connected = unity_connection::check_connection(p).await;
+            if !connected {
+                if let Ok(mut up) = state.unity_port.lock() {
+                    *up = None;
+                }
+                return Ok(serde_json::json!({
+                    "connected": false,
+                    "port": null,
+                    "editor_state": null,
+                    "profiling": false
+                }));
+            }
+            let editor_state = unity_connection::get_editor_state(p).await.ok();
+            let profiling = state.profiler.is_active().await;
+            Ok(serde_json::json!({
+                "connected": true,
+                "port": p,
+                "editor_state": editor_state,
+                "profiling": profiling
+            }))
+        }
+        None => Ok(serde_json::json!({
+            "connected": false,
+            "port": null,
+            "editor_state": null,
+            "profiling": false
+        })),
+    }
+}
+
+#[tauri::command]
+pub async fn disconnect_unity(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if let Ok(mut p) = state.unity_port.lock() {
+        *p = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_profiling(
+    session_name: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let port = {
+        state.unity_port.lock().map_err(|e| e.to_string())?
+            .ok_or("未连接 Unity")?
+    };
+
+    if !unity_connection::check_connection(port).await {
+        if let Ok(mut p) = state.unity_port.lock() {
+            *p = None;
+        }
+        return Err("Unity 连接已断开，请重新连接".to_string());
+    }
+
+    let editor_state = unity_connection::get_editor_state(port).await
+        .map_err(|e| format!("读取 Unity 编辑器状态失败: {}", e))?;
+    if !editor_state.is_playing {
+        return Err("请先在 Unity 中进入 Play 模式，再开始采集".to_string());
+    }
+
+    state.profiler.start_session(port, session_name, app).await
+}
+
+#[tauri::command]
+pub async fn stop_profiling(
+    state: State<'_, AppState>,
+) -> Result<profiler_session::SessionMeta, String> {
+    let session = state.profiler.stop_session().await?;
+
+    // Save session to disk
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    profiler_session::save_session(&project_path, &session)?;
+
+    Ok(profiler_session::SessionMeta::from(&session))
+}
+
+#[tauri::command]
+pub async fn list_profiler_sessions(
+    state: State<'_, AppState>,
+) -> Result<Vec<profiler_session::SessionMeta>, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    Ok(profiler_session::list_sessions(&project_path))
+}
+
+#[tauri::command]
+pub async fn get_profiler_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<profiler_session::ProfilerSession, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    profiler_session::load_session(&project_path, &session_id)
+}
+
+#[tauri::command]
+pub async fn delete_profiler_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    profiler_session::delete_session(&project_path, &session_id)
+}
+
+#[tauri::command]
+pub async fn rename_profiler_session(
+    session_id: String,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    profiler_session::rename_session(&project_path, &session_id, &new_name)
+}
+
+#[tauri::command]
+pub async fn generate_profiler_report(
+    session_id: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<profiler_report::ProfilerReport, String> {
+    let (session, response_language) = {
+        let project_path = state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?;
+        let settings = load_settings_internal(&project_path);
+        let lang = settings.as_ref().map(|s| s.language.as_str()).unwrap_or("zh");
+        let session = profiler_session::load_session(&project_path, &session_id)?;
+        (session, lang.to_string())
+    };
+
+    let prompt = profiler_report::build_profiler_prompt(&session, &response_language);
+    let runtime_dir = build_ai_runtime_dir()?;
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(runtime_dir_str.as_str()) } else { None };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    emit_ai_log(&app, &format!("[性能分析] 会话: {} | CLI: {}", session.name, cli_name));
+
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &runtime_dir_str).await?;
+
+    if raw.trim().is_empty() {
+        return Err("AI CLI 返回了空结果".to_string());
+    }
+
+    // Parse JSON response
+    let parsed: serde_json::Value = extract_json_from_response(&raw)
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or(serde_json::json!({
+            "health_score": 50,
+            "summary": raw.clone(),
+            "findings": [],
+            "optimization_plan": ""
+        }));
+
+    let report = profiler_report::ProfilerReport {
+        session_id: session_id.clone(),
+        health_score: parsed.get("health_score").and_then(|v| v.as_u64()).unwrap_or(50) as u32,
+        summary: parsed.get("summary").and_then(|v| v.as_str()).unwrap_or(&raw).to_string(),
+        findings: parsed.get("findings")
+            .and_then(|v| serde_json::from_value::<Vec<profiler_report::ProfilerFinding>>(v.clone()).ok())
+            .unwrap_or_default(),
+        optimization_plan: parsed.get("optimization_plan").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        raw_response: raw,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    emit_ai_log(&app, &format!("[性能分析完成] 健康评分: {}/100", report.health_score));
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn generate_deep_profiler_analysis(
+    session_id: String,
+    file_paths: Vec<String>,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<profiler_report::DeepAnalysisReport, String> {
+    let (session, project_path, response_language) = {
+        let project_path = state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?;
+        let settings = load_settings_internal(&project_path);
+        let lang = settings.as_ref().map(|s| s.language.as_str()).unwrap_or("zh");
+        let session = profiler_session::load_session(&project_path, &session_id)?;
+        (session, project_path, lang.to_string())
+    };
+
+    // Read source files
+    let mut source_files = Vec::new();
+    for fp in &file_paths {
+        let abs = PathBuf::from(&project_path).join(fp);
+        if let Ok(content) = std::fs::read_to_string(&abs) {
+            source_files.push((fp.clone(), content));
+        }
+    }
+
+    if source_files.is_empty() {
+        return Err("未找到可分析的源文件".to_string());
+    }
+
+    let prompt = profiler_report::build_deep_analysis_prompt(&session, &source_files, &response_language);
+    let runtime_dir = build_ai_runtime_dir()?;
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(runtime_dir_str.as_str()) } else { None };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    emit_ai_log(&app, &format!("[深度性能分析] 会话: {} | 文件: {} 个", session.name, source_files.len()));
+
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &runtime_dir_str).await?;
+
+    if raw.trim().is_empty() {
+        return Err("AI CLI 返回了空结果".to_string());
+    }
+
+    let parsed: serde_json::Value = extract_json_from_response(&raw)
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or(serde_json::json!({
+            "summary": raw.clone(),
+            "source_findings": []
+        }));
+
+    let report = profiler_report::DeepAnalysisReport {
+        session_id: session_id.clone(),
+        summary: parsed.get("summary").and_then(|v| v.as_str()).unwrap_or(&raw).to_string(),
+        source_findings: parsed.get("source_findings")
+            .and_then(|v| serde_json::from_value::<Vec<profiler_report::SourceFinding>>(v.clone()).ok())
+            .unwrap_or_default(),
+        raw_response: raw,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    emit_ai_log(&app, &format!("[深度分析完成] 发现 {} 个问题", report.source_findings.len()));
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn compare_profiler_sessions(
+    session_a_id: String,
+    session_b_id: String,
+    state: State<'_, AppState>,
+) -> Result<profiler_report::ComparisonResult, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    let a = profiler_session::load_session(&project_path, &session_a_id)?;
+    let b = profiler_session::load_session(&project_path, &session_b_id)?;
+    Ok(profiler_report::compare_sessions(&a, &b))
+}
+
+#[tauri::command]
+pub async fn export_profiler_report(
+    session_id: String,
+    report: profiler_report::ProfilerReport,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    let session = profiler_session::load_session(&project_path, &session_id)?;
+    let md = profiler_report::export_report_markdown(&report, &session.name);
+
+    let export_dir = PathBuf::from(&project_path).join(".analytics").join("exports");
+    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let filename = format!("profiler_report_{}.md", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+    let export_path = export_dir.join(&filename);
+    std::fs::write(&export_path, &md).map_err(|e| e.to_string())?;
+
+    Ok(export_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn export_profiler_comparison(
+    result: profiler_report::ComparisonResult,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    let md = profiler_report::export_comparison_markdown(&result);
+
+    let export_dir = PathBuf::from(&project_path).join(".analytics").join("exports");
+    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let filename = format!("profiler_comparison_{}.md", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+    let export_path = export_dir.join(&filename);
+    std::fs::write(&export_path, &md).map_err(|e| e.to_string())?;
+
+    Ok(export_path.to_string_lossy().to_string())
+}
+
+fn load_settings_internal(project_path: &str) -> Option<AppSettings> {
+    let settings_path = PathBuf::from(project_path).join(".analytics").join("settings.json");
+    if settings_path.is_file() {
+        if let Ok(json) = std::fs::read_to_string(&settings_path) {
+            return serde_json::from_str(&json).ok();
+        }
+    }
+    None
+}
+
+fn extract_json_from_response(raw: &str) -> Option<String> {
+    // Try to extract JSON block from markdown code fence
+    if let Some(start) = raw.find("```json") {
+        let after = &raw[start + 7..];
+        if let Some(end) = after.find("```") {
+            return Some(after[..end].trim().to_string());
+        }
+    }
+    // Try to find raw JSON object
+    if let Some(start) = raw.find('{') {
+        if let Some(end) = raw.rfind('}') {
+            if end > start {
+                return Some(raw[start..=end].to_string());
+            }
+        }
+    }
+    None
 }

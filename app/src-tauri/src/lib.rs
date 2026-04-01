@@ -1,6 +1,11 @@
+mod ai_review;
 mod analysis;
+mod asset_metrics;
 mod commands;
 mod graph;
+mod profiler_report;
+mod profiler_session;
+mod unity_connection;
 mod workspace;
 
 use commands::AppState;
@@ -35,6 +40,29 @@ pub fn run() {
             commands::export_analysis,
             commands::has_analysis_cache,
             commands::save_analysis_cache,
+            commands::get_orphan_nodes,
+            commands::get_duplicate_resources,
+            commands::get_hotspots,
+            commands::get_asset_metrics,
+            commands::run_ai_code_review,
+            commands::run_ai_project_code_review,
+            commands::run_ai_asset_review,
+            // Profiler commands
+            commands::discover_unity,
+            commands::connect_unity,
+            commands::get_unity_status,
+            commands::disconnect_unity,
+            commands::start_profiling,
+            commands::stop_profiling,
+            commands::list_profiler_sessions,
+            commands::get_profiler_session,
+            commands::delete_profiler_session,
+            commands::rename_profiler_session,
+            commands::generate_profiler_report,
+            commands::generate_deep_profiler_analysis,
+            commands::compare_profiler_sessions,
+            commands::export_profiler_report,
+            commands::export_profiler_comparison,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

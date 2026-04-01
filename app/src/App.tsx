@@ -9,6 +9,8 @@ import CodeGraph from './pages/CodeGraph';
 import SuspectedRefs from './pages/SuspectedRefs';
 import Hardcode from './pages/Hardcode';
 import Settings from './pages/Settings';
+import PerformanceHub from './pages/PerformanceHub';
+import Redundancy from './pages/Redundancy';
 import { useAppStore } from './store';
 
 export default function App() {
@@ -22,6 +24,8 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/overview" replace />} />
         <Route path="/overview" element={<Overview />} />
+        <Route path="/performance" element={<PerformanceHub />} />
+        <Route path="/redundancy" element={<Redundancy />} />
         <Route path="/asset" element={<AssetGraph />} />
         <Route path="/code" element={<CodeGraph />} />
         <Route path="/suspected" element={<SuspectedRefs />} />

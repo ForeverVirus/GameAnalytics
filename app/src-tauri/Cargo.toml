@@ -32,3 +32,5 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
+sha2 = "0.10"
+reqwest = { version = "0.12", features = ["json"] }
