@@ -64,6 +64,29 @@ unity-sdk/package.json
 
 If the repository is reachable by Unity Package Manager, you can also add `com.gameanalytics.profiler` as a Git package.
 
+Because the Unity SDK lives inside a subfolder of the main repository, you can install it directly with:
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk
+```
+
+To pin a tag, branch, or commit, append a revision suffix, for example:
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk#master
+```
+
+or:
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk#v1.0.0
+```
+
+Notes:
+
+- If the repository is private, the installer must have access to that repository
+- `path=/unity-sdk` is required, otherwise Unity will try to resolve the repository root as the package
+
 ## Quick Start
 
 ### 1. Create a Config Asset

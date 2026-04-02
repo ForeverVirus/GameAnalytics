@@ -64,6 +64,29 @@ unity-sdk/package.json
 
 如果仓库可被 Unity Package Manager 访问，也可以直接以 Git URL 的方式添加 `com.gameanalytics.profiler`。
 
+当前仓库的 Unity SDK 位于主仓库子目录，因此可以直接使用：
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk
+```
+
+如果要锁定某个 tag / 分支 / commit，可以在 URL 末尾追加版本锚点，例如：
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk#master
+```
+
+或：
+
+```text
+https://github.com/ForeverVirus/GameAnalytics.git?path=/unity-sdk#v1.0.0
+```
+
+注意：
+
+- 如果仓库是私有的，安装者必须有该仓库的访问权限
+- `path=/unity-sdk` 不能省略，否则 Unity 会把整个仓库根目录当成包来解析
+
 ## 快速接入
 
 ### 1. 创建配置资产

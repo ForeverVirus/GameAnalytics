@@ -1,8 +1,8 @@
-# GameScriptAnalytics
+# GameAnalytics
 
 English | [中文](README.md)
 
-GameScriptAnalytics is a local-first analysis toolkit for Unity and Godot projects. It combines static project inspection, device-side performance capture, offline report analysis, deep function sampling, and AI-assisted diagnosis in one desktop workflow. The goal is not just to show metrics, but to connect project structure and runtime evidence so teams can locate bottlenecks faster.
+GameAnalytics is a local-first analysis toolkit for Unity and Godot projects. It combines static project inspection, device-side performance capture, offline report analysis, deep function sampling, and AI-assisted diagnosis in one desktop workflow. The goal is not just to show metrics, but to connect project structure and runtime evidence so teams can locate bottlenecks faster.
 
 The desktop application is built on [Tauri 2](https://v2.tauri.app/), combining a Rust backend with a web-based workspace to deliver local performance, native packaging, and practical desktop integration.
 
