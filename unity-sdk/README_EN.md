@@ -239,7 +239,3 @@ The desktop app reads SDK-generated report files and provides:
 - CPU call stacks and module function tables
 - jank and screenshot navigation
 - AI performance assistant
-
-## License
-
-MIT

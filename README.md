@@ -4,6 +4,8 @@
 
 GameScriptAnalytics 是一套面向 Unity / Godot 项目的本地优先分析工具，覆盖静态工程分析、真机性能采集、离线性能报告、深度函数采样和 AI 辅助诊断。它的目标不是只给你一堆指标，而是把“项目结构”和“运行时问题”放到同一套工作流里，帮助团队更快定位性能瓶颈、资源问题和代码风险。
 
+桌面端基于 [Tauri 2](https://v2.tauri.app/) 构建，结合 Rust 后端与 Web 前端工作台，兼顾本地性能、原生打包和跨模块桌面交互能力。
+
 ## 核心能力
 
 ### 静态工程分析
@@ -158,7 +160,7 @@ npm run tauri build
 
 | 层级 | 技术 |
 |------|------|
-| 桌面框架 | Tauri 2 |
+| 桌面框架 | [Tauri 2](https://v2.tauri.app/) |
 | 前端 | React 19 + TypeScript + Vite |
 | 后端 | Rust |
 | 状态管理 | Zustand |
@@ -175,7 +177,3 @@ GameAnalytics/
 ├── README.md
 └── README_EN.md
 ```
-
-## License
-
-MIT

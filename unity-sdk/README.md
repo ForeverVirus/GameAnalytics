@@ -239,7 +239,3 @@ Application.persistentDataPath/GameAnalytics
 - CPU 调用堆栈与模块函数表
 - 卡顿与截图定位
 - AI 性能分析助手
-
-## License
-
-MIT
