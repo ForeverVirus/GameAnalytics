@@ -1,0 +1,23 @@
+{
+  "name": "com.gameanalytics.profiler",
+  "version": "1.0.0",
+  "displayName": "GameAnalytics Device Profiler",
+  "description": "Real-device performance profiling SDK for Unity. Captures FPS, CPU/GPU timing, memory, rendering stats, screenshots, overdraw, battery, temperature and more. Export .gaprof files for AI-powered analysis in GameAnalytics desktop app.",
+  "unity": "2020.3",
+  "unityRelease": "0f1",
+  "keywords": [
+    "profiler",
+    "performance",
+    "optimization",
+    "analytics",
+    "device",
+    "mobile"
+  ],
+  "author": {
+    "name": "GameAnalytics",
+    "url": "https://github.com/GameAnalytics"
+  },
+  "license": "MIT",
+  "type": "library",
+  "samples": []
+}
