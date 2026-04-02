@@ -254,8 +254,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   saveSettings: async (settings) => {
     try {
-      await api.saveSettings(settings);
-      set({ settings });
+      const persisted = await api.saveSettings(settings);
+      set({ settings: persisted });
     } catch (e) {
       set({ error: String(e) });
     }

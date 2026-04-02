@@ -186,6 +186,15 @@ pub async fn poll_profiler_frame(port: u16) -> Result<(UnityProfilerStats, Unity
         get_memory_info(port),
         get_rendering_stats(port),
     );
+    if stats.is_err() && mem.is_err() && render.is_err() {
+        return Err(
+            stats
+                .err()
+                .or_else(|| mem.err())
+                .or_else(|| render.err())
+                .unwrap_or_else(|| "Unity-Skills profiler polling failed".to_string()),
+        );
+    }
     Ok((
         stats.unwrap_or_default(),
         mem.unwrap_or_default(),

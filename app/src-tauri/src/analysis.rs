@@ -58,7 +58,7 @@ pub fn analyze_unity_references(
         "mat",
         "asset",
         "controller",
-        "overrideController",
+        "overridecontroller",
         "anim",
     ];
     let mut edges = Vec::new();

@@ -12,7 +12,7 @@ export default function TopBar() {
 
   const navItems = [
     { to: '/overview', label: t('nav.overview') },
-    { to: '/performance', label: t('nav.performance', '性能分析') },
+    { to: '/device-profile', label: t('nav.deviceProfile', '真机分析') },
     { to: '/redundancy', label: t('nav.redundancy', '冗余资源') },
     { to: '/asset', label: t('nav.asset') },
     { to: '/code', label: t('nav.code') },

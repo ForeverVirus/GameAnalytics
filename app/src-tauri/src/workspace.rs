@@ -178,15 +178,15 @@ fn is_relevant_file(path: &Path, engine: &EngineType) -> bool {
                 | "blend"
                 | "anim"
                 | "controller"
-                | "overrideController"
-                | "renderTexture"
+                | "overridecontroller"
+                | "rendertexture"
                 | "cubemap"
                 | "flare"
                 | "fontsettings"
                 | "guiskin"
                 | "mixer"
-                | "physicMaterial"
-                | "physicsMaterial2D"
+                | "physicmaterial"
+                | "physicsmaterial2d"
         ),
         EngineType::Godot => matches!(
             ext.as_str(),
@@ -210,5 +210,17 @@ fn is_relevant_file(path: &Path, engine: &EngineType) -> bool {
                 | "cfg"
         ),
         EngineType::Unknown => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unity_extension_matching_is_case_normalized() {
+        assert!(is_relevant_file(Path::new("Assets/Test.overrideController"), &EngineType::Unity));
+        assert!(is_relevant_file(Path::new("Assets/Test.renderTexture"), &EngineType::Unity));
+        assert!(is_relevant_file(Path::new("Assets/Test.physicsMaterial2D"), &EngineType::Unity));
     }
 }

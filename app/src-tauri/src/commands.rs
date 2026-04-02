@@ -1,6 +1,7 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -11,6 +12,8 @@ use tokio::process::Command as TokioCommand;
 use crate::analysis;
 use crate::asset_metrics;
 use crate::ai_review;
+use crate::device_profile;
+use crate::device_transfer;
 use crate::graph::model::*;
 use crate::graph::store::{FrontendGraph, GraphStore};
 use crate::profiler_report;
@@ -38,6 +41,100 @@ impl Default for AppState {
             profiler: profiler_session::ProfilerManager::default(),
         }
     }
+}
+
+fn cloned_project_info(state: &State<'_, AppState>) -> Result<Option<workspace::ProjectInfo>, String> {
+    let project = state.project.lock().map_err(|e| e.to_string())?;
+    Ok(project.clone())
+}
+
+fn require_project_info(state: &State<'_, AppState>) -> Result<workspace::ProjectInfo, String> {
+    cloned_project_info(state)?.ok_or("No project selected".to_string())
+}
+
+fn require_project_path(state: &State<'_, AppState>) -> Result<String, String> {
+    Ok(require_project_info(state)?.path)
+}
+
+fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("settings.json"))
+}
+
+fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
+    let defaults = AppSettings::default();
+    let default_ai_cli = defaults.ai_cli.clone();
+    let default_language = defaults.language.clone();
+    let cli = settings.ai_cli.trim().to_ascii_lowercase();
+    settings.ai_cli = match cli.as_str() {
+        "claude" | "codex" | "gemini" | "copilot" => cli,
+        _ => default_ai_cli,
+    };
+
+    let language = settings.language.trim().to_ascii_lowercase();
+    settings.language = if language.starts_with("en") {
+        "en".to_string()
+    } else {
+        default_language
+    };
+
+    // The backend only supports whole-project scans today. Normalize unsupported values
+    // so saved settings match actual runtime behavior.
+    settings.scan_scope = "full".to_string();
+
+    settings.ai_model = settings.ai_model.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    settings.ai_thinking = settings.ai_thinking.and_then(|value| {
+        let trimmed = value.trim().to_ascii_lowercase();
+        matches!(trimmed.as_str(), "low" | "medium" | "high" | "xhigh").then_some(trimmed)
+    });
+
+    settings
+}
+
+fn load_settings_from_app(app: &tauri::AppHandle) -> Result<AppSettings, String> {
+    let path = settings_path(app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<AppSettings>(&content)
+            .map(sanitize_settings)
+            .map_err(|e| e.to_string()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn resolve_project_relative_path(project_root: &str, file_path: &str) -> Result<PathBuf, String> {
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return Err("文件路径不能为空".to_string());
+    }
+
+    let root = std::fs::canonicalize(project_root)
+        .map_err(|e| format!("项目目录不存在: {}", e))?;
+    let rel = Path::new(trimmed);
+    if rel.is_absolute() {
+        return Err("只允许访问项目内相对路径".to_string());
+    }
+
+    let mut candidate = root.clone();
+    for component in rel.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => candidate.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("非法项目内路径".to_string());
+            }
+        }
+    }
+
+    let resolved = std::fs::canonicalize(&candidate)
+        .map_err(|e| format!("目标文件不存在: {}", e))?;
+    if !resolved.starts_with(&root) {
+        return Err("路径超出项目目录".to_string());
+    }
+
+    Ok(resolved)
 }
 
 fn emit_progress(
@@ -289,22 +386,33 @@ pub fn select_project(
     let project_path = PathBuf::from(&path);
     let info = workspace::scan_project(&project_path)?;
 
-    let mut project = state.project.lock().map_err(|e| e.to_string())?;
-    *project = Some(info.clone());
+    {
+        let mut project = state.project.lock().map_err(|e| e.to_string())?;
+        *project = Some(info.clone());
+    }
 
     // Try to load cached analysis, otherwise reset graph
-    let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
     let cache_path = project_path.join(".analytics").join("cache.json");
-    if cache_path.exists() {
+    let (next_graph, loaded_from_cache) = if cache_path.exists() {
         if let Ok(data) = std::fs::read_to_string(&cache_path) {
             if let Ok(cached) = serde_json::from_str::<GraphStore>(&data) {
                 log::info!("Loaded cached analysis from {}", cache_path.display());
-                *graph = cached;
-                return Ok(info);
+                (cached, true)
+            } else {
+                (GraphStore::new(), false)
             }
+        } else {
+            (GraphStore::new(), false)
         }
+    } else {
+        (GraphStore::new(), false)
+    };
+
+    let mut graph = state.graph.lock().map_err(|e| e.to_string())?;
+    *graph = next_graph;
+    if loaded_from_cache {
+        return Ok(info);
     }
-    *graph = GraphStore::new();
 
     Ok(info)
 }
@@ -317,7 +425,14 @@ pub fn has_analysis_cache(state: State<'_, AppState>) -> Result<bool, String> {
         let cache_path = PathBuf::from(&info.path)
             .join(".analytics")
             .join("cache.json");
-        Ok(cache_path.exists())
+        if !cache_path.is_file() {
+            return Ok(false);
+        }
+        let is_valid = std::fs::read_to_string(&cache_path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<GraphStore>(&data).ok())
+            .is_some();
+        Ok(is_valid)
     } else {
         Ok(false)
     }
@@ -326,14 +441,14 @@ pub fn has_analysis_cache(state: State<'_, AppState>) -> Result<bool, String> {
 /// Save current analysis state to cache
 #[tauri::command]
 pub fn save_analysis_cache(state: State<'_, AppState>) -> Result<(), String> {
-    let project = state.project.lock().map_err(|e| e.to_string())?;
-    let project_info = project.as_ref().ok_or("No project selected")?;
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let project_path = require_project_path(&state)?;
+    let cache_json = {
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        serde_json::to_string(&*graph).map_err(|e| e.to_string())?
+    };
 
-    let cache_dir = PathBuf::from(&project_info.path).join(".analytics");
+    let cache_dir = PathBuf::from(&project_path).join(".analytics");
     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("创建缓存目录失败: {}", e))?;
-
-    let cache_json = serde_json::to_string(&*graph).map_err(|e| e.to_string())?;
     std::fs::write(cache_dir.join("cache.json"), &cache_json).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -850,6 +965,7 @@ pub async fn run_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AnalysisStats, String> {
+    let settings = load_settings_from_app(&app)?;
     let (project_path, engine) = {
         let project = state.project.lock().map_err(|e| e.to_string())?;
         let project_info = project.as_ref().ok_or("No project selected")?;
@@ -1058,7 +1174,7 @@ pub async fn run_analysis(
         8,
         &format!("正在检测硬编码 ({} 个文件)...", code_total),
     );
-    {
+    if settings.hardcode_enabled {
         let pp = project_path.clone();
         let cf = code_files.clone();
         let findings = tokio::task::spawn_blocking(move || analysis::detect_hardcodes(&pp, &cf))
@@ -1068,6 +1184,15 @@ pub async fn run_analysis(
         for f in findings {
             graph.add_hardcode_finding(f);
         }
+    } else {
+        emit_progress(
+            &app,
+            "scan",
+            "hardcodes",
+            6,
+            8,
+            "已跳过硬编码检测（设置关闭）",
+        );
     }
 
     // Suspected dynamic references
@@ -1079,7 +1204,7 @@ pub async fn run_analysis(
         8,
         &format!("正在检测疑似引用 ({} 个文件)...", code_total),
     );
-    {
+    if settings.suspected_enabled {
         let pp = project_path.clone();
         let cf = code_files.clone();
         let refs =
@@ -1090,6 +1215,15 @@ pub async fn run_analysis(
         for r in refs {
             graph.add_suspected_ref(r);
         }
+    } else {
+        emit_progress(
+            &app,
+            "scan",
+            "suspected",
+            7,
+            8,
+            "已跳过疑似引用检测（设置关闭）",
+        );
     }
 
     graph.recalculate_stats();
@@ -1261,7 +1395,7 @@ fn classify_file(ext: &str) -> (NodeType, Option<AssetKind>) {
             (NodeType::Asset, Some(AssetKind::Texture))
         }
         "wav" | "mp3" | "ogg" | "aiff" => (NodeType::Asset, Some(AssetKind::Audio)),
-        "anim" | "controller" | "overrideController" => {
+        "anim" | "controller" | "overridecontroller" => {
             (NodeType::Asset, Some(AssetKind::Animation))
         }
         "fbx" | "obj" | "blend" | "glb" | "gltf" => (NodeType::Asset, Some(AssetKind::Data)),
@@ -1271,29 +1405,26 @@ fn classify_file(ext: &str) -> (NodeType, Option<AssetKind>) {
 
 /// Save application settings
 #[tauri::command]
-pub fn save_settings(settings: AppSettings, app: tauri::AppHandle) -> Result<(), String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+pub fn save_settings(settings: AppSettings, app: tauri::AppHandle) -> Result<AppSettings, String> {
+    let settings = sanitize_settings(settings);
+    let path = settings_path(&app)?;
+    let dir = path.parent().ok_or("无法确定设置目录".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("settings.json");
     let content = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(settings)
 }
 
 /// Load application settings
 #[tauri::command]
 pub fn load_settings(app: tauri::AppHandle) -> Result<AppSettings, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let path = dir.join("settings.json");
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| e.to_string()),
-        Err(_) => Ok(AppSettings::default()),
-    }
+    load_settings_from_app(&app)
 }
 
 /// Open file location in system file explorer
 #[tauri::command]
 pub fn open_file_location(file_path: String, project_path: String) -> Result<(), String> {
-    let full = PathBuf::from(&project_path).join(&file_path);
+    let full = resolve_project_relative_path(&project_path, &file_path)?;
     let full_str = full.to_string_lossy().to_string().replace('/', "\\");
 
     #[cfg(target_os = "windows")]
@@ -1328,10 +1459,7 @@ pub fn open_file_location(file_path: String, project_path: String) -> Result<(),
 /// Read an image file and return its contents as a base64 data URL
 #[tauri::command]
 pub fn read_image_base64(file_path: String, project_path: String) -> Result<String, String> {
-    let full = PathBuf::from(&project_path).join(&file_path);
-    if !full.exists() {
-        return Err("File not found".to_string());
-    }
+    let full = resolve_project_relative_path(&project_path, &file_path)?;
     // Limit to 10MB to avoid memory issues
     let metadata = std::fs::metadata(&full).map_err(|e| e.to_string())?;
     if metadata.len() > 10 * 1024 * 1024 {
@@ -1371,9 +1499,10 @@ pub async fn run_ai_analysis(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let (prompt, target_node_id, runtime_dir) = {
+        let project_path = cloned_project_info(&state)?
+            .map(|p| p.path)
+            .unwrap_or_default();
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let project = state.project.lock().map_err(|e| e.to_string())?;
-        let project_path = project.as_ref().map(|p| p.path.clone()).unwrap_or_default();
         let target_id = resolve_analysis_target_node_id(&node_id, &graph)
             .ok_or_else(|| format!("节点未找到: {}", node_id))?;
         let workdir = build_ai_runtime_dir()?;
@@ -1503,9 +1632,10 @@ pub async fn run_deep_ai_analysis(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let (prompt, target_node_id, runtime_dir) = {
+        let project_path = cloned_project_info(&state)?
+            .map(|p| p.path)
+            .unwrap_or_default();
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let project = state.project.lock().map_err(|e| e.to_string())?;
-        let project_path = project.as_ref().map(|p| p.path.clone()).unwrap_or_default();
         let target_id = resolve_analysis_target_node_id(&node_id, &graph)
             .ok_or_else(|| format!("节点未找到: {}", node_id))?;
         let workdir = build_ai_runtime_dir()?;
@@ -2289,9 +2419,12 @@ pub fn export_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let project = state.project.lock().map_err(|e| e.to_string())?;
-    let project_info = project.as_ref().ok_or("No project selected")?;
-    let graph = state.graph.lock().map_err(|e| e.to_string())?;
+    let project_info = require_project_info(&state)?;
+    let graph_snapshot = state.graph.lock().map_err(|e| e.to_string())?.clone();
+    let frontend_graph = graph_snapshot.to_frontend_graph();
+    let stats = graph_snapshot.stats.clone();
+    let suspected_refs = graph_snapshot.suspected_refs.clone();
+    let hardcode_findings = graph_snapshot.hardcode_findings.clone();
 
     let export_dir = PathBuf::from(&project_info.path).join(".analytics");
     std::fs::create_dir_all(&export_dir).map_err(|e| format!("创建导出目录失败: {}", e))?;
@@ -2299,7 +2432,6 @@ pub fn export_analysis(
     emit_progress(&app, "export", "graph", 0, 4, "正在导出图谱数据...");
 
     // Export graph.json (full graph with ai_summary metadata)
-    let frontend_graph = graph.to_frontend_graph();
     let graph_json = serde_json::to_string_pretty(&frontend_graph).map_err(|e| e.to_string())?;
     std::fs::write(export_dir.join("graph.json"), &graph_json).map_err(|e| e.to_string())?;
 
@@ -2317,7 +2449,7 @@ pub fn export_analysis(
         engine: format!("{:?}", project_info.engine),
         project_name: project_info.name.clone(),
         timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        stats: graph.stats.clone(),
+        stats,
     };
     let stats_json = serde_json::to_string_pretty(&export_stats).map_err(|e| e.to_string())?;
     std::fs::write(export_dir.join("stats.json"), &stats_json).map_err(|e| e.to_string())?;
@@ -2325,14 +2457,13 @@ pub fn export_analysis(
     emit_progress(&app, "export", "findings", 2, 4, "正在导出检测结果...");
 
     // Export suspected-refs.json
-    let suspected_json =
-        serde_json::to_string_pretty(&graph.suspected_refs).map_err(|e| e.to_string())?;
+    let suspected_json = serde_json::to_string_pretty(&suspected_refs).map_err(|e| e.to_string())?;
     std::fs::write(export_dir.join("suspected-refs.json"), &suspected_json)
         .map_err(|e| e.to_string())?;
 
     // Export hardcode-findings.json
     let hardcode_json =
-        serde_json::to_string_pretty(&graph.hardcode_findings).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&hardcode_findings).map_err(|e| e.to_string())?;
     std::fs::write(export_dir.join("hardcode-findings.json"), &hardcode_json)
         .map_err(|e| e.to_string())?;
 
@@ -2346,27 +2477,27 @@ pub fn export_analysis(
         "- **生成时间**: {}\n",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
     ));
-    md.push_str(&format!("- **文件总数**: {}\n", graph.stats.total_files));
-    md.push_str(&format!("- **资源文件**: {}\n", graph.stats.asset_count));
-    md.push_str(&format!("- **脚本文件**: {}\n", graph.stats.script_count));
-    md.push_str(&format!("- **类**: {}\n", graph.stats.class_count));
-    md.push_str(&format!("- **方法**: {}\n", graph.stats.method_count));
+    md.push_str(&format!("- **文件总数**: {}\n", graph_snapshot.stats.total_files));
+    md.push_str(&format!("- **资源文件**: {}\n", graph_snapshot.stats.asset_count));
+    md.push_str(&format!("- **脚本文件**: {}\n", graph_snapshot.stats.script_count));
+    md.push_str(&format!("- **类**: {}\n", graph_snapshot.stats.class_count));
+    md.push_str(&format!("- **方法**: {}\n", graph_snapshot.stats.method_count));
     md.push_str(&format!(
         "- **正式引用边**: {}\n",
-        graph.stats.official_edges
+        graph_snapshot.stats.official_edges
     ));
     md.push_str(&format!(
         "- **疑似引用**: {}\n",
-        graph.stats.suspected_count
+        graph_snapshot.stats.suspected_count
     ));
     md.push_str(&format!(
         "- **硬编码检出**: {}\n\n",
-        graph.stats.hardcode_count
+        graph_snapshot.stats.hardcode_count
     ));
 
     // Collect AI summaries grouped by directory
     let mut dir_summaries: HashMap<String, Vec<String>> = HashMap::new();
-    for node in graph.nodes.values() {
+    for node in graph_snapshot.nodes.values() {
         if let Some(summary) = node.metadata.get("ai_summary") {
             if summary != "未分析" {
                 let dir = node
@@ -2399,13 +2530,13 @@ pub fn export_analysis(
     }
 
     // Unused resources (nodes with zero incoming edges, type Asset)
-    let asset_nodes: Vec<&GraphNode> = graph
+    let asset_nodes: Vec<&GraphNode> = graph_snapshot
         .nodes
         .values()
         .filter(|n| n.node_type == NodeType::Asset)
         .collect();
     let referenced_targets: std::collections::HashSet<&str> =
-        graph.edges.iter().map(|e| e.target.as_str()).collect();
+        graph_snapshot.edges.iter().map(|e| e.target.as_str()).collect();
     let unused: Vec<&&GraphNode> = asset_nodes
         .iter()
         .filter(|n| !referenced_targets.contains(n.id.as_str()))
@@ -2433,11 +2564,8 @@ pub fn export_analysis(
 pub fn get_orphan_nodes(
     state: State<'_, AppState>,
 ) -> Result<Vec<OrphanReport>, String> {
+    let project_path = PathBuf::from(require_project_path(&state)?);
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let project = state.project.lock().map_err(|e| e.to_string())?;
-    let project_path = project.as_ref()
-        .map(|p| PathBuf::from(&p.path))
-        .ok_or("未打开项目")?;
 
     Ok(analysis::detect_orphan_nodes(&graph, &project_path))
 }
@@ -2446,11 +2574,8 @@ pub fn get_orphan_nodes(
 pub fn get_duplicate_resources(
     state: State<'_, AppState>,
 ) -> Result<Vec<DuplicateGroup>, String> {
+    let project_path = PathBuf::from(require_project_path(&state)?);
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let project = state.project.lock().map_err(|e| e.to_string())?;
-    let project_path = project.as_ref()
-        .map(|p| PathBuf::from(&p.path))
-        .ok_or("未打开项目")?;
 
     Ok(analysis::detect_duplicates(&graph, &project_path))
 }
@@ -2471,11 +2596,8 @@ pub fn get_hotspots(
 pub fn get_asset_metrics(
     state: State<'_, AppState>,
 ) -> Result<Vec<AssetMetrics>, String> {
+    let project_path = PathBuf::from(require_project_path(&state)?);
     let graph = state.graph.lock().map_err(|e| e.to_string())?;
-    let project = state.project.lock().map_err(|e| e.to_string())?;
-    let project_path = project.as_ref()
-        .map(|p| PathBuf::from(&p.path))
-        .ok_or("未打开项目")?;
 
     Ok(asset_metrics::collect_asset_metrics(&graph, &project_path))
 }
@@ -2612,9 +2734,10 @@ pub async fn run_ai_code_review(
     state: State<'_, AppState>,
 ) -> Result<ReviewResult, String> {
     let (prompt, file_path, target_node_id, rt) = {
+        let project_path = cloned_project_info(&state)?
+            .map(|p| p.path)
+            .unwrap_or_default();
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let project = state.project.lock().map_err(|e| e.to_string())?;
-        let project_path = project.as_ref().map(|p| p.path.clone()).unwrap_or_default();
         build_code_review_request(
             &graph,
             &project_path,
@@ -2649,12 +2772,8 @@ pub async fn run_ai_project_code_review(
     state: State<'_, AppState>,
 ) -> Result<Vec<ReviewResult>, String> {
     let (graph, project_path, mut code_file_ids) = {
+        let project_path = require_project_path(&state)?;
         let graph = state.graph.lock().map_err(|e| e.to_string())?.clone();
-        let project = state.project.lock().map_err(|e| e.to_string())?;
-        let project_path = project
-            .as_ref()
-            .map(|p| p.path.clone())
-            .ok_or("未打开项目")?;
         let mut code_file_ids: Vec<String> = graph
             .nodes
             .values()
@@ -2753,11 +2872,8 @@ pub async fn run_ai_asset_review(
     state: State<'_, AppState>,
 ) -> Result<ReviewResult, String> {
     let (prompt, runtime_dir) = {
+        let project_path = PathBuf::from(require_project_path(&state)?);
         let graph = state.graph.lock().map_err(|e| e.to_string())?;
-        let project = state.project.lock().map_err(|e| e.to_string())?;
-        let project_path = project.as_ref()
-            .map(|p| PathBuf::from(&p.path))
-            .ok_or("未打开项目")?;
 
         let metrics = asset_metrics::collect_asset_metrics(&graph, &project_path);
         // Only send metrics with issues (poor/fair rating) to keep prompt size down
@@ -2990,13 +3106,10 @@ pub async fn generate_profiler_report(
     state: State<'_, AppState>,
 ) -> Result<profiler_report::ProfilerReport, String> {
     let (session, response_language) = {
-        let project_path = state.project.lock().map_err(|e| e.to_string())?
-            .as_ref().map(|p| p.path.clone())
-            .ok_or("未打开项目")?;
-        let settings = load_settings_internal(&project_path);
-        let lang = settings.as_ref().map(|s| s.language.as_str()).unwrap_or("zh");
+        let project_path = require_project_path(&state)?;
+        let settings = load_settings_from_app(&app)?;
         let session = profiler_session::load_session(&project_path, &session_id)?;
-        (session, lang.to_string())
+        (session, settings.language)
     };
 
     let prompt = profiler_report::build_profiler_prompt(&session, &response_language);
@@ -3050,13 +3163,10 @@ pub async fn generate_deep_profiler_analysis(
     state: State<'_, AppState>,
 ) -> Result<profiler_report::DeepAnalysisReport, String> {
     let (session, project_path, response_language) = {
-        let project_path = state.project.lock().map_err(|e| e.to_string())?
-            .as_ref().map(|p| p.path.clone())
-            .ok_or("未打开项目")?;
-        let settings = load_settings_internal(&project_path);
-        let lang = settings.as_ref().map(|s| s.language.as_str()).unwrap_or("zh");
+        let project_path = require_project_path(&state)?;
+        let settings = load_settings_from_app(&app)?;
         let session = profiler_session::load_session(&project_path, &session_id)?;
-        (session, project_path, lang.to_string())
+        (session, project_path, settings.language)
     };
 
     // Read source files
@@ -3167,16 +3277,6 @@ pub async fn export_profiler_comparison(
     Ok(export_path.to_string_lossy().to_string())
 }
 
-fn load_settings_internal(project_path: &str) -> Option<AppSettings> {
-    let settings_path = PathBuf::from(project_path).join(".analytics").join("settings.json");
-    if settings_path.is_file() {
-        if let Ok(json) = std::fs::read_to_string(&settings_path) {
-            return serde_json::from_str(&json).ok();
-        }
-    }
-    None
-}
-
 fn extract_json_from_response(raw: &str) -> Option<String> {
     // Try to extract JSON block from markdown code fence
     if let Some(start) = raw.find("```json") {
@@ -3194,4 +3294,418 @@ fn extract_json_from_response(raw: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ======================== Device Profiler Commands ========================
+
+#[tauri::command]
+pub async fn discover_devices(port: Option<u16>) -> Result<Vec<device_transfer::DiscoveredDevice>, String> {
+    Ok(device_transfer::discover_devices(port).await)
+}
+
+#[tauri::command]
+pub async fn get_device_status(ip: String, port: u16) -> Result<device_transfer::DeviceStatus, String> {
+    device_transfer::get_device_status(&ip, port).await
+}
+
+#[tauri::command]
+pub async fn list_device_sessions(ip: String, port: u16) -> Result<Vec<device_transfer::RemoteSession>, String> {
+    device_transfer::list_device_sessions(&ip, port).await
+}
+
+#[tauri::command]
+pub async fn download_device_session(
+    ip: String,
+    port: u16,
+    file_name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let save_dir = {
+        let project = state.project.lock().map_err(|e| e.to_string())?;
+        if let Some(project_info) = project.as_ref() {
+            PathBuf::from(&project_info.path)
+                .join(".analytics")
+                .join("device_profiles")
+        } else {
+            std::env::temp_dir()
+                .join("GameAnalytics")
+                .join("device_profiles")
+        }
+    };
+    std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+    device_transfer::download_session(&ip, port, &file_name, &save_dir.to_string_lossy()).await
+}
+
+#[tauri::command]
+pub async fn remote_start_capture(
+    ip: String,
+    port: u16,
+    session_name: Option<String>,
+) -> Result<(), String> {
+    device_transfer::remote_start_capture(&ip, port, session_name).await
+}
+
+#[tauri::command]
+pub async fn remote_stop_capture(
+    ip: String,
+    port: u16,
+) -> Result<device_transfer::RemoteStopCaptureResult, String> {
+    device_transfer::remote_stop_capture(&ip, port).await
+}
+
+#[tauri::command]
+pub async fn import_gaprof_file(
+    file_path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_path = {
+        state.project.lock().map_err(|e| e.to_string())?
+            .as_ref().map(|p| p.path.clone())
+            .ok_or("未打开项目")?
+    };
+    let save_dir = PathBuf::from(&project_path)
+        .join(".analytics")
+        .join("device_profiles");
+    std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+
+    let src_path = PathBuf::from(&file_path);
+    let file_name = src_path.file_name()
+        .ok_or("Invalid file path")?
+        .to_string_lossy()
+        .to_string();
+    let dest = save_dir.join(&file_name);
+    std::fs::copy(&src_path, &dest).map_err(|e| e.to_string())?;
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn parse_gaprof_session(file_path: String) -> Result<device_profile::DeviceProfileReport, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let mut report = device_profile::generate_report(&session, &session_name);
+    report.source_file_path = Some(file_path);
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn generate_device_report(
+    file_path: String,
+    _app: tauri::AppHandle,
+    _state: State<'_, AppState>,
+) -> Result<device_profile::DeviceProfileReport, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let mut report = device_profile::generate_report(&session, &session_name);
+    report.source_file_path = Some(file_path);
+    Ok(report)
+}
+
+#[tauri::command]
+pub async fn get_device_screenshot(
+    file_path: String,
+    frame_index: u32,
+) -> Result<String, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let screenshot = session.screenshots.iter()
+        .find(|s| s.frame_index == frame_index)
+        .ok_or("Screenshot not found for this frame")?;
+
+    // Return as base64 encoded JPEG
+    Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &screenshot.jpeg_data))
+}
+
+#[tauri::command]
+pub async fn export_device_report(
+    report: device_profile::DeviceProfileReport,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let md = device_profile::export_device_report_markdown(&report);
+    let export_dir = {
+        let project_guard = state.project.lock().map_err(|e| e.to_string())?;
+        if let Some(project) = project_guard.as_ref() {
+            PathBuf::from(&project.path).join(".analytics").join("exports")
+        } else if let Some(source_file) = report.source_file_path.as_deref() {
+            PathBuf::from(source_file)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .ok_or("无法确定导出目录")?
+        } else {
+            return Err("未打开项目，且报告没有来源文件路径，无法导出".to_string());
+        }
+    };
+    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let filename = format!("device_profile_{}.md", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+    let export_path = export_dir.join(&filename);
+    std::fs::write(&export_path, &md).map_err(|e| e.to_string())?;
+
+    Ok(export_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn get_frame_functions(
+    file_path: String,
+    frame_index: u32,
+) -> Result<Option<device_profile::PerFrameFunctions>, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let idx = frame_index as usize;
+    if idx >= session.function_samples.len() {
+        return Ok(None);
+    }
+    let samples = &session.function_samples[idx];
+    if samples.is_empty() {
+        return Ok(None);
+    }
+
+    let functions: Vec<device_profile::PerFrameFunction> = samples.iter().map(|s| {
+        let name = session.string_table.get(s.function_name_index as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("Function_{}", s.function_name_index));
+        device_profile::PerFrameFunction {
+            name,
+            category: s.category.label().to_string(),
+            self_ms: s.self_time_ms,
+            total_ms: s.total_time_ms,
+            call_count: s.call_count,
+            depth: s.depth,
+            parent_index: s.parent_index,
+        }
+    }).collect();
+
+    Ok(Some(device_profile::PerFrameFunctions { frame_index, functions }))
+}
+
+#[tauri::command]
+pub async fn get_session_logs(
+    file_path: String,
+    log_type_filter: Option<u8>,
+    limit: Option<usize>,
+) -> Result<Vec<device_profile::LogEntry>, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let max = limit.unwrap_or(500);
+    let entries: Vec<device_profile::LogEntry> = session.log_entries.into_iter()
+        .filter(|l| log_type_filter.map_or(true, |t| l.log_type == t))
+        .take(max)
+        .collect();
+
+    Ok(entries)
+}
+
+/// AI-powered device profiling analysis that combines profiler data with code graph
+#[tauri::command]
+pub async fn run_ai_device_analysis(
+    file_path: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DeviceAiAnalysis, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let report = device_profile::generate_report(&session, &session_name);
+
+    // Build the base prompt from profiler data
+    let mut prompt = device_profile::build_ai_prompt(&report);
+
+    // Enrich with code graph context if available
+    let graph_context = {
+        let project = cloned_project_info(&state)?;
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        if let Some(project) = project.as_ref() {
+            build_code_graph_context(&graph, &project.path, &report)
+        } else {
+            String::new()
+        }
+    };
+
+    if !graph_context.is_empty() {
+        prompt.push_str("\n\n### Code Graph Context (Static Analysis)\n");
+        prompt.push_str("The following is the relevant code dependency information from static analysis of the project:\n\n");
+        prompt.push_str(&graph_context);
+        prompt.push_str("\nPlease cross-reference the profiler bottlenecks with the code graph to identify specific optimization targets.\n");
+    }
+
+    emit_ai_log(&app, &format!("[设备性能AI分析] 文件: {} | prompt长度: {} 字符", session_name, prompt.len()));
+
+    let runtime_dir = build_ai_runtime_dir()?;
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(runtime_dir_str.as_str()) } else { None };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &runtime_dir.to_string_lossy())
+        .await
+        .map_err(|e| {
+            emit_ai_log(&app, &format!("[设备性能AI分析错误] {}", e));
+            e
+        })?;
+
+    if raw.trim().is_empty() {
+        return Err("AI CLI returned empty result".to_string());
+    }
+
+    emit_ai_log(&app, &format!("[设备性能AI分析完成] 响应长度: {} 字符", raw.len()));
+
+    Ok(DeviceAiAnalysis {
+        session_name: session_name.clone(),
+        overall_grade: report.overall_grade.clone(),
+        analysis: raw,
+        timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAiAnalysis {
+    pub session_name: String,
+    pub overall_grade: String,
+    pub analysis: String,
+    pub timestamp: String,
+}
+
+/// Build code graph context for the AI prompt based on profiler bottlenecks
+fn build_code_graph_context(
+    graph: &crate::graph::store::GraphStore,
+    project_path: &str,
+    report: &device_profile::DeviceProfileReport,
+) -> String {
+    use crate::graph::model::NodeType;
+    let mut context = String::new();
+
+    // Find script files that could be related to the bottleneck module
+    let bottleneck = &report.module_analysis.bottleneck;
+    let code_files: Vec<_> = graph.nodes.values()
+        .filter(|n| n.node_type == NodeType::CodeFile)
+        .collect();
+
+    if code_files.is_empty() {
+        return context;
+    }
+
+    context.push_str(&format!("Project: {}\n", project_path));
+    context.push_str(&format!("Total scripts analyzed: {}\n", code_files.len()));
+    context.push_str(&format!("Bottleneck module: {}\n\n", bottleneck));
+
+    // Find MonoBehaviour classes (they run in Update/LateUpdate/FixedUpdate)
+    let mono_classes: Vec<_> = graph.nodes.values()
+        .filter(|n| n.node_type == NodeType::Class)
+        .filter(|n| {
+            // Check if this class has edges indicating MonoBehaviour inheritance
+            graph.edges.iter().any(|e| {
+                e.target == n.id && matches!(e.edge_type, crate::graph::model::EdgeType::Inherits)
+            })
+        })
+        .collect();
+
+    if !mono_classes.is_empty() {
+        context.push_str(&format!("MonoBehaviour-derived classes ({}):\n", mono_classes.len()));
+        for cls in mono_classes.iter().take(30) {
+            if let Some(path) = cls.file_path.as_deref() {
+                context.push_str(&format!("  - {} ({})\n", cls.name, path));
+            } else {
+                context.push_str(&format!("  - {}\n", cls.name));
+            }
+        }
+        context.push('\n');
+    }
+
+    // Find hotspot files (highest in-degree)
+    let mut file_degrees: Vec<(&str, usize)> = code_files.iter()
+        .map(|n| {
+            let degree = graph.edges.iter().filter(|e| e.target == n.id).count();
+            (n.name.as_str(), degree)
+        })
+        .collect();
+    file_degrees.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if !file_degrees.is_empty() {
+        context.push_str("Top dependency hotspot scripts (most depended upon):\n");
+        for (name, degree) in file_degrees.iter().take(15) {
+            context.push_str(&format!("  - {} ({} dependents)\n", name, degree));
+        }
+        context.push('\n');
+    }
+
+    // If function analysis exists, try to map function names to code files
+    if let Some(fa) = &report.function_analysis {
+        let script_functions: Vec<_> = fa.top_functions.iter()
+            .filter(|f| f.category == "用户脚本")
+            .take(10)
+            .collect();
+
+        if !script_functions.is_empty() {
+            context.push_str("Top user script functions (from profiler):\n");
+            for f in &script_functions {
+                context.push_str(&format!("  - {} (self={:.3}ms, calls={:.1}/frame)\n",
+                    f.name, f.avg_self_ms, f.avg_call_count));
+            }
+            context.push('\n');
+        }
+    }
+
+    context
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_settings_normalizes_scope_and_empty_values() {
+        let settings = AppSettings {
+            ai_cli: "  ".to_string(),
+            language: "en-US".to_string(),
+            scan_scope: "custom".to_string(),
+            hardcode_enabled: false,
+            suspected_enabled: true,
+            ai_model: Some("  gpt-5.4  ".to_string()),
+            ai_thinking: Some(" HIGH ".to_string()),
+        };
+
+        let sanitized = sanitize_settings(settings);
+        assert_eq!(sanitized.ai_cli, "claude");
+        assert_eq!(sanitized.language, "en");
+        assert_eq!(sanitized.scan_scope, "full");
+        assert_eq!(sanitized.ai_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(sanitized.ai_thinking.as_deref(), Some("high"));
+        assert!(!sanitized.hardcode_enabled);
+        assert!(sanitized.suspected_enabled);
+    }
+
+    #[test]
+    fn resolve_project_relative_path_rejects_parent_segments() {
+        let root = std::env::temp_dir().join(format!(
+            "ga-path-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(root.join("Assets")).unwrap();
+
+        let result = resolve_project_relative_path(root.to_str().unwrap(), "../secret.txt");
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

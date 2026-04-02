@@ -3,6 +3,7 @@
   "nav": {
     "overview": "Overview",
     "performance": "Performance",
+    "deviceProfile": "Device Profile",
     "redundancy": "Redundancy",
     "asset": "Asset Graph",
     "code": "Code Graph",

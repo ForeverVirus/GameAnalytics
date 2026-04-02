@@ -2,6 +2,8 @@ mod ai_review;
 mod analysis;
 mod asset_metrics;
 mod commands;
+mod device_profile;
+mod device_transfer;
 mod graph;
 mod profiler_report;
 mod profiler_session;
@@ -63,6 +65,21 @@ pub fn run() {
             commands::compare_profiler_sessions,
             commands::export_profiler_report,
             commands::export_profiler_comparison,
+            // Device profiler commands
+            commands::discover_devices,
+            commands::get_device_status,
+            commands::list_device_sessions,
+            commands::download_device_session,
+            commands::remote_start_capture,
+            commands::remote_stop_capture,
+            commands::import_gaprof_file,
+            commands::parse_gaprof_session,
+            commands::generate_device_report,
+            commands::get_device_screenshot,
+            commands::export_device_report,
+            commands::get_frame_functions,
+            commands::get_session_logs,
+            commands::run_ai_device_analysis,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

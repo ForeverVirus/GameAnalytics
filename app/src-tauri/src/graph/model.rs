@@ -170,6 +170,7 @@ pub struct AnalysisProgress {
 
 /// Application settings (persisted to disk)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     pub ai_cli: String,
     pub language: String,

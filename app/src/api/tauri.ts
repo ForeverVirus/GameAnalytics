@@ -294,6 +294,252 @@ export interface UnityStatus {
   profiling: boolean;
 }
 
+// ======================== Device Profiler Types ========================
+
+export interface DeviceStatus {
+  deviceModel: string;
+  projectName: string;
+  sdkVersion: string;
+  capturing: boolean;
+  frameCount: number;
+  elapsed: number;
+  currentFps: number;
+}
+
+export interface DiscoveredDevice {
+  ip: string;
+  port: number;
+  status: DeviceStatus;
+}
+
+export interface RemoteSession {
+  fileName: string;
+  sizeBytes: number;
+  created: string;
+}
+
+export interface RemoteStopCaptureResult {
+  status: string;
+  filePath: string;
+  sessionName: string;
+  frameCount: number;
+  duration: number;
+  screenshotCount: number;
+}
+
+export interface DeviceInfo {
+  device_model: string;
+  device_name: string;
+  operating_system: string;
+  processor_type: string;
+  processor_count: number;
+  processor_frequency: number;
+  system_memory_mb: number;
+  graphics_device_name: string;
+  graphics_memory_mb: number;
+  screen_width: number;
+  screen_height: number;
+  screen_dpi: number;
+  quality_level: number;
+  quality_name: string;
+  unity_version: string;
+  app_version: string;
+  platform: string;
+}
+
+export interface TimelinePoint {
+  time: number;
+  value: number;
+}
+
+export interface FpsBucket {
+  label: string;
+  count: number;
+  percentage: number;
+}
+
+export interface ModuleBreakdown {
+  name: string;
+  avg_ms: number;
+  max_ms: number;
+  percentage: number;
+}
+
+export interface SceneStats {
+  scene_name: string;
+  frame_count: number;
+  avg_fps: number;
+  avg_memory_mb: number;
+  jank_count: number;
+}
+
+export interface DeviceProfileReport {
+  session_name: string;
+  source_file_path?: string | null;
+  device_info: DeviceInfo;
+  duration_seconds: number;
+  total_frames: number;
+  summary: {
+    avg_fps: number;
+    min_fps: number;
+    max_fps: number;
+    p1_fps: number;
+    p5_fps: number;
+    p50_fps: number;
+    p95_fps: number;
+    p99_fps: number;
+    fps_stability: number;
+    avg_cpu_ms: number;
+    avg_gpu_ms: number;
+    peak_memory_mb: number;
+    avg_memory_mb: number;
+    total_gc_alloc_mb: number;
+    jank_count: number;
+    severe_jank_count: number;
+    jank_rate: number;
+  };
+  fps_analysis: {
+    target_fps: number;
+    frames_below_target: number;
+    below_target_pct: number;
+    frames_below_30: number;
+    below_30_pct: number;
+    fps_histogram: FpsBucket[];
+    fps_timeline: TimelinePoint[];
+  };
+  memory_analysis: {
+    peak_total_mb: number;
+    avg_total_mb: number;
+    peak_mono_mb: number;
+    peak_gfx_mb: number;
+    total_gc_alloc_mb: number;
+    gc_alloc_per_frame_bytes: number;
+    memory_timeline: TimelinePoint[];
+    memory_trend: string;
+    memory_growth_rate_mb_per_min: number;
+  };
+  rendering_analysis: {
+    avg_draw_calls: number;
+    max_draw_calls: number;
+    avg_batches: number;
+    avg_triangles: number;
+    max_triangles: number;
+    avg_set_pass: number;
+    batching_efficiency: number;
+  };
+  module_analysis: {
+    avg_render_ms: number;
+    avg_scripts_ms: number;
+    avg_physics_ms: number;
+    avg_animation_ms: number;
+    avg_ui_ms: number;
+    avg_particle_ms: number;
+    avg_loading_ms: number;
+    avg_gc_ms: number;
+    bottleneck: string;
+    module_breakdown: ModuleBreakdown[];
+  };
+  jank_analysis: {
+    total_jank_frames: number;
+    severe_jank_frames: number;
+    jank_rate_pct: number;
+    severe_jank_rate_pct: number;
+    worst_frame_ms: number;
+    worst_frame_index: number;
+    jank_timeline: TimelinePoint[];
+  };
+  thermal_analysis: {
+    has_data: boolean;
+    avg_temperature: number;
+    max_temperature: number;
+    battery_drain: number;
+    temperature_timeline: TimelinePoint[];
+    thermal_throttle_risk: string;
+  };
+  overdraw_analysis: {
+    avg_overdraw: number;
+    max_overdraw: number;
+    sample_count: number;
+  } | null;
+  function_analysis: FunctionAnalysis | null;
+  log_analysis: LogAnalysis | null;
+  scene_breakdown: SceneStats[];
+  overall_grade: string;
+  screenshot_count: number;
+  screenshot_frame_indices: number[];
+}
+
+// V2 Deep Profiling Types
+export interface FunctionStats {
+  name: string;
+  category: string;
+  avg_self_ms: number;
+  total_self_ms: number;
+  self_pct: number;
+  avg_total_ms: number;
+  total_total_ms: number;
+  total_pct: number;
+  avg_call_count: number;
+  total_call_count: number;
+  frames_called: number;
+}
+
+export interface CategoryBreakdown {
+  category: string;
+  avg_ms: number;
+  total_ms: number;
+  percentage: number;
+  function_count: number;
+}
+
+export interface PerFrameFunction {
+  name: string;
+  category: string;
+  self_ms: number;
+  total_ms: number;
+  call_count: number;
+  depth: number;
+  parent_index: number;
+}
+
+export interface PerFrameFunctions {
+  frame_index: number;
+  functions: PerFrameFunction[];
+}
+
+export interface FunctionAnalysis {
+  has_data: boolean;
+  total_sampled_frames: number;
+  top_functions: FunctionStats[];
+  category_breakdown: CategoryBreakdown[];
+  per_frame_data: PerFrameFunctions[];
+}
+
+export interface LogSummaryEntry {
+  message: string;
+  count: number;
+  first_frame: number;
+  log_type: number;
+}
+
+export interface LogEntry {
+  timestamp: number;
+  frame_index: number;
+  log_type: number;
+  message: string;
+  stack_trace: string;
+}
+
+export interface LogAnalysis {
+  has_data: boolean;
+  total_logs: number;
+  error_count: number;
+  warning_count: number;
+  exception_count: number;
+  top_errors: LogSummaryEntry[];
+  top_warnings: LogSummaryEntry[];
+}
+
 export const api = {
   selectProject: (path: string) =>
     invoke<ProjectInfo>('select_project', { path }),
@@ -326,7 +572,7 @@ export const api = {
     invoke<HardcodeFinding[]>('get_hardcode_findings'),
 
   saveSettings: (settings: AppSettings) =>
-    invoke<void>('save_settings', { settings }),
+    invoke<AppSettings>('save_settings', { settings }),
 
   loadSettings: () =>
     invoke<AppSettings>('load_settings'),
@@ -428,7 +674,57 @@ export const api = {
 
   exportProfilerComparison: (result: ComparisonResult) =>
     invoke<string>('export_profiler_comparison', { result }),
+
+  // Device Profiler APIs
+  discoverDevices: (port?: number) =>
+    invoke<DiscoveredDevice[]>('discover_devices', { port: port || null }),
+
+  getDeviceStatus: (ip: string, port: number) =>
+    invoke<DeviceStatus>('get_device_status', { ip, port }),
+
+  listDeviceSessions: (ip: string, port: number) =>
+    invoke<RemoteSession[]>('list_device_sessions', { ip, port }),
+
+  downloadDeviceSession: (ip: string, port: number, fileName: string) =>
+    invoke<string>('download_device_session', { ip, port, fileName }),
+
+  remoteStartCapture: (ip: string, port: number, sessionName?: string) =>
+    invoke<void>('remote_start_capture', { ip, port, sessionName: sessionName || null }),
+
+  remoteStopCapture: (ip: string, port: number) =>
+    invoke<RemoteStopCaptureResult>('remote_stop_capture', { ip, port }),
+
+  importGaprofFile: (filePath: string) =>
+    invoke<string>('import_gaprof_file', { filePath }),
+
+  parseGaprofSession: (filePath: string) =>
+    invoke<DeviceProfileReport>('parse_gaprof_session', { filePath }),
+
+  generateDeviceReport: (filePath: string) =>
+    invoke<DeviceProfileReport>('generate_device_report', { filePath }),
+
+  getDeviceScreenshot: (filePath: string, frameIndex: number) =>
+    invoke<string>('get_device_screenshot', { filePath, frameIndex }),
+
+  exportDeviceReport: (report: DeviceProfileReport) =>
+    invoke<string>('export_device_report', { report }),
+
+  getFrameFunctions: (filePath: string, frameIndex: number) =>
+    invoke<PerFrameFunctions | null>('get_frame_functions', { filePath, frameIndex }),
+
+  getSessionLogs: (filePath: string, logTypeFilter?: number, limit?: number) =>
+    invoke<LogEntry[]>('get_session_logs', { filePath, logTypeFilter: logTypeFilter ?? null, limit: limit ?? null }),
+
+  runAiDeviceAnalysis: (filePath: string, cliName: string, model?: string, thinking?: string) =>
+    invoke<DeviceAiAnalysis>('run_ai_device_analysis', { filePath, cliName, model: model ?? null, thinking: thinking ?? null }),
 };
+
+export interface DeviceAiAnalysis {
+  session_name: string;
+  overall_grade: string;
+  analysis: string;
+  timestamp: string;
+}
 
 export interface AnalysisProgress {
   phase: string;

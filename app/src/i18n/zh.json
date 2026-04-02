@@ -3,6 +3,7 @@
   "nav": {
     "overview": "总览",
     "performance": "性能分析",
+    "deviceProfile": "真机分析",
     "redundancy": "冗余资源",
     "asset": "资源图谱",
     "code": "代码图谱",
