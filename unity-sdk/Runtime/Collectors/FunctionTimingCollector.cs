@@ -16,6 +16,7 @@ namespace GameAnalytics.Profiler.Collectors
         private struct MarkerEntry
         {
             public string name;
+            public string parentName;
             public FunctionCategory category;
             public ProfilerRecorder recorder;
         }
@@ -24,85 +25,85 @@ namespace GameAnalytics.Profiler.Collectors
         private CaptureSession _session;
 
         // Pre-defined engine markers matching UWA GOT's tracked functions
-        private static readonly (string name, ProfilerCategory cat, FunctionCategory funcCat)[] KnownMarkers = new[]
+        private static readonly (string name, ProfilerCategory cat, FunctionCategory funcCat, string parentName)[] KnownMarkers = new[]
         {
             // Rendering
-            ("Camera.Render", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("RenderPipelineManager.DoRenderLoop_Internal", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("PostLateUpdate.UpdateAllRenderers", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("Render.OpaqueGeometry", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("Render.TransparentGeometry", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("RenderForwardOpaque.Render", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("Shadows.RenderShadowMap", ProfilerCategory.Render, FunctionCategory.Rendering),
-            ("Culling", ProfilerCategory.Render, FunctionCategory.Rendering),
+            ("Camera.Render", ProfilerCategory.Render, FunctionCategory.Rendering, null),
+            ("RenderPipelineManager.DoRenderLoop_Internal", ProfilerCategory.Render, FunctionCategory.Rendering, null),
+            ("PostLateUpdate.UpdateAllRenderers", ProfilerCategory.Render, FunctionCategory.Rendering, "Camera.Render"),
+            ("Culling", ProfilerCategory.Render, FunctionCategory.Rendering, "Camera.Render"),
+            ("Render.OpaqueGeometry", ProfilerCategory.Render, FunctionCategory.Rendering, "Camera.Render"),
+            ("RenderForwardOpaque.Render", ProfilerCategory.Render, FunctionCategory.Rendering, "Render.OpaqueGeometry"),
+            ("Render.TransparentGeometry", ProfilerCategory.Render, FunctionCategory.Rendering, "Camera.Render"),
+            ("Shadows.RenderShadowMap", ProfilerCategory.Render, FunctionCategory.Rendering, "Camera.Render"),
 
             // GPU Sync / Wait
-            ("Gfx.WaitForPresentOnGfxThread", ProfilerCategory.Render, FunctionCategory.Sync),
-            ("TimeUpdate.WaitForLastPresentationAndUpdateTime", ProfilerCategory.Render, FunctionCategory.Sync),
-            ("Graphics.PresentAndSync", ProfilerCategory.Render, FunctionCategory.Sync),
-            ("EndGraphicsJobs", ProfilerCategory.Render, FunctionCategory.Sync),
+            ("Graphics.PresentAndSync", ProfilerCategory.Render, FunctionCategory.Sync, null),
+            ("Gfx.WaitForPresentOnGfxThread", ProfilerCategory.Render, FunctionCategory.Sync, "Graphics.PresentAndSync"),
+            ("TimeUpdate.WaitForLastPresentationAndUpdateTime", ProfilerCategory.Render, FunctionCategory.Sync, "Graphics.PresentAndSync"),
+            ("EndGraphicsJobs", ProfilerCategory.Render, FunctionCategory.Sync, "Graphics.PresentAndSync"),
 
             // Scripts / User Code
-            ("BehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("LateBehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("FixedBehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("CoroutinesDelayedCalls", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("Monobehaviour.OnMouse_", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("PlayerEndOfFrame", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("UnitySynchronizationContext.ExecuteTasks", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("Application.InvokeOnBeforeRender", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("NativeInputSystem.ShouldRunUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("NativeInputSystem.NotifyBeforeUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("NativeInputSystem.NotifyUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("PlayerConnection.Poll", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("AudioManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("TextureStreamingManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("EnlightenRuntimeManager.PostUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("LightProbeProxyVolumeManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("ScriptableRuntimeReflectionSystemWrapper.Internal_ScriptableRuntimeReflectionSystemWrapper_TickRealtimeProbes", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("OnDemandRendering.GetRenderFrameInterval", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("SupportedRenderingFeatures.IsUIOverlayRenderedBySRP", ProfilerCategory.Scripts, FunctionCategory.Scripting),
-            ("CustomRenderTextures.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting),
+            ("BehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, null),
+            ("LateBehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, null),
+            ("FixedBehaviourUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, null),
+            ("CoroutinesDelayedCalls", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("Monobehaviour.OnMouse_", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("PlayerEndOfFrame", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("UnitySynchronizationContext.ExecuteTasks", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("Application.InvokeOnBeforeRender", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("NativeInputSystem.ShouldRunUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("NativeInputSystem.NotifyBeforeUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("NativeInputSystem.NotifyUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("PlayerConnection.Poll", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("AudioManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("TextureStreamingManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting, "BehaviourUpdate"),
+            ("EnlightenRuntimeManager.PostUpdate", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("LightProbeProxyVolumeManager.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("ScriptableRuntimeReflectionSystemWrapper.Internal_ScriptableRuntimeReflectionSystemWrapper_TickRealtimeProbes", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("OnDemandRendering.GetRenderFrameInterval", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("SupportedRenderingFeatures.IsUIOverlayRenderedBySRP", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
+            ("CustomRenderTextures.Update", ProfilerCategory.Scripts, FunctionCategory.Scripting, "LateBehaviourUpdate"),
 
             // Physics
-            ("Physics.Processing", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.Simulate", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.FetchResults", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.ProcessReports", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.Interpolation", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.UpdateBodies", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.UpdateCloth", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics.UpdateVehicles", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics2D.Simulate", ProfilerCategory.Physics, FunctionCategory.Physics),
-            ("Physics2D.InterpolatePoses", ProfilerCategory.Physics, FunctionCategory.Physics),
+            ("Physics.Simulate", ProfilerCategory.Physics, FunctionCategory.Physics, null),
+            ("Physics.Processing", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.FetchResults", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.ProcessReports", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.Interpolation", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.UpdateBodies", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.UpdateCloth", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics.UpdateVehicles", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics.Simulate"),
+            ("Physics2D.Simulate", ProfilerCategory.Physics, FunctionCategory.Physics, null),
+            ("Physics2D.InterpolatePoses", ProfilerCategory.Physics, FunctionCategory.Physics, "Physics2D.Simulate"),
 
             // Animation
-            ("Director.ProcessFrame", ProfilerCategory.Animation, FunctionCategory.Animation),
-            ("Director.PrepareFrame", ProfilerCategory.Animation, FunctionCategory.Animation),
-            ("Director.SampleTime", ProfilerCategory.Animation, FunctionCategory.Animation),
-            ("DirectorUpdate", ProfilerCategory.Animation, FunctionCategory.Animation),
-            ("MeshSkinning.Update", ProfilerCategory.Animation, FunctionCategory.Animation),
+            ("DirectorUpdate", ProfilerCategory.Animation, FunctionCategory.Animation, null),
+            ("Director.ProcessFrame", ProfilerCategory.Animation, FunctionCategory.Animation, "DirectorUpdate"),
+            ("Director.PrepareFrame", ProfilerCategory.Animation, FunctionCategory.Animation, "DirectorUpdate"),
+            ("Director.SampleTime", ProfilerCategory.Animation, FunctionCategory.Animation, "DirectorUpdate"),
+            ("MeshSkinning.Update", ProfilerCategory.Animation, FunctionCategory.Animation, "DirectorUpdate"),
 
             // UI
-            ("UI.LayoutUpdate", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("UI.RenderOverlays", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("Rendering.UpdateBatches", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("Rendering.RenderOverlays", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("Rendering.EmitWorldScreenspaceCameraGeometry", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("GUI.Repaint", ProfilerCategory.Gui, FunctionCategory.UI),
-            ("GUI.ProcessEvents", ProfilerCategory.Gui, FunctionCategory.UI),
+            ("UI.LayoutUpdate", ProfilerCategory.Gui, FunctionCategory.UI, null),
+            ("Rendering.UpdateBatches", ProfilerCategory.Gui, FunctionCategory.UI, "UI.LayoutUpdate"),
+            ("UI.RenderOverlays", ProfilerCategory.Gui, FunctionCategory.UI, null),
+            ("Rendering.RenderOverlays", ProfilerCategory.Gui, FunctionCategory.UI, "UI.RenderOverlays"),
+            ("Rendering.EmitWorldScreenspaceCameraGeometry", ProfilerCategory.Gui, FunctionCategory.UI, "UI.RenderOverlays"),
+            ("GUI.ProcessEvents", ProfilerCategory.Gui, FunctionCategory.UI, null),
+            ("GUI.Repaint", ProfilerCategory.Gui, FunctionCategory.UI, "GUI.ProcessEvents"),
 
             // Loading
-            ("Loading.AsyncRead", ProfilerCategory.Loading, FunctionCategory.Loading),
-            ("Loading.PreloadManager", ProfilerCategory.Loading, FunctionCategory.Loading),
-            ("UpdatePreloading", ProfilerCategory.Loading, FunctionCategory.Loading),
+            ("Loading.PreloadManager", ProfilerCategory.Loading, FunctionCategory.Loading, null),
+            ("Loading.AsyncRead", ProfilerCategory.Loading, FunctionCategory.Loading, "Loading.PreloadManager"),
+            ("UpdatePreloading", ProfilerCategory.Loading, FunctionCategory.Loading, "Loading.PreloadManager"),
 
             // Particles
-            ("ParticleSystem.Update", ProfilerCategory.Particles, FunctionCategory.Particles),
-            ("ParticleSystem.EndUpdateAll", ProfilerCategory.Particles, FunctionCategory.Particles),
+            ("ParticleSystem.Update", ProfilerCategory.Particles, FunctionCategory.Particles, null),
+            ("ParticleSystem.EndUpdateAll", ProfilerCategory.Particles, FunctionCategory.Particles, "ParticleSystem.Update"),
 
             // GC
-            ("GC.Collect", ProfilerCategory.Memory, FunctionCategory.GC),
+            ("GC.Collect", ProfilerCategory.Memory, FunctionCategory.GC, null),
         };
 
         public void Initialize(CaptureSession session)
@@ -119,6 +120,7 @@ namespace GameAnalytics.Profiler.Collectors
                 _markers.Add(new MarkerEntry
                 {
                     name = m.name,
+                    parentName = m.parentName,
                     category = m.funcCat,
                     recorder = rec
                 });
@@ -128,6 +130,8 @@ namespace GameAnalytics.Profiler.Collectors
         public List<FunctionSample> CollectSamples()
         {
             var samples = new List<FunctionSample>();
+            var activeMarkers = new List<MarkerEntry>();
+            var sampleIndexByName = new Dictionary<string, int>(StringComparer.Ordinal);
 
             for (int i = 0; i < _markers.Count; i++)
             {
@@ -140,6 +144,8 @@ namespace GameAnalytics.Profiler.Collectors
                 float ms = ns / 1_000_000f;
                 ushort nameIdx = _session.GetOrAddString(m.name);
 
+                sampleIndexByName[m.name] = samples.Count;
+                activeMarkers.Add(m);
                 samples.Add(new FunctionSample
                 {
                     functionNameIndex = nameIdx,
@@ -148,8 +154,24 @@ namespace GameAnalytics.Profiler.Collectors
                     totalTimeMs = ms,
                     callCount = (ushort)System.Math.Max(1, m.recorder.Count),
                     depth = 0,
-                    parentIndex = -1
+                    parentIndex = -1,
+                    threadIndex = 0
                 });
+            }
+
+            for (int i = 0; i < activeMarkers.Count; i++)
+            {
+                var marker = activeMarkers[i];
+                if (string.IsNullOrEmpty(marker.parentName))
+                    continue;
+
+                if (sampleIndexByName.TryGetValue(marker.parentName, out int parentIndex))
+                {
+                    var sample = samples[i];
+                    sample.parentIndex = (short)parentIndex;
+                    sample.depth = (byte)(samples[parentIndex].depth + 1);
+                    samples[i] = sample;
+                }
             }
 
             return samples;

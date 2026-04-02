@@ -3460,35 +3460,71 @@ pub async fn export_device_report(
 pub async fn get_frame_functions(
     file_path: String,
     frame_index: u32,
+    category_filters: Option<Vec<u8>>,
+    prefer_nearest: Option<bool>,
 ) -> Result<Option<device_profile::PerFrameFunctions>, String> {
     let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
     let session = device_profile::parse_gaprof(&data)?;
+    let categories = category_filters.map(|items| {
+        items.into_iter()
+            .map(device_profile::FunctionCategory::from_u8)
+            .collect::<Vec<_>>()
+    });
+
+    let build_frame_functions = |target_idx: usize| -> Option<device_profile::PerFrameFunctions> {
+        let samples = session.function_samples.get(target_idx)?;
+        let functions: Vec<device_profile::PerFrameFunction> = samples.iter()
+            .filter(|s| categories.as_ref().map_or(true, |cats| cats.contains(&s.category)))
+            .map(|s| {
+                let name = session.string_table.get(s.function_name_index as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Function_{}", s.function_name_index));
+                device_profile::PerFrameFunction {
+                    name,
+                    category: s.category.label().to_string(),
+                    self_ms: s.self_time_ms,
+                    total_ms: s.total_time_ms,
+                    call_count: s.call_count,
+                    depth: s.depth,
+                    parent_index: s.parent_index,
+                    thread_index: s.thread_index,
+                }
+            })
+            .collect();
+
+        if functions.is_empty() {
+            None
+        } else {
+            Some(device_profile::PerFrameFunctions {
+                frame_index: target_idx as u32,
+                functions,
+            })
+        }
+    };
 
     let idx = frame_index as usize;
-    if idx >= session.function_samples.len() {
-        return Ok(None);
+    if let Some(exact) = build_frame_functions(idx) {
+        return Ok(Some(exact));
     }
-    let samples = &session.function_samples[idx];
-    if samples.is_empty() {
+
+    if !prefer_nearest.unwrap_or(false) {
         return Ok(None);
     }
 
-    let functions: Vec<device_profile::PerFrameFunction> = samples.iter().map(|s| {
-        let name = session.string_table.get(s.function_name_index as usize)
-            .cloned()
-            .unwrap_or_else(|| format!("Function_{}", s.function_name_index));
-        device_profile::PerFrameFunction {
-            name,
-            category: s.category.label().to_string(),
-            self_ms: s.self_time_ms,
-            total_ms: s.total_time_ms,
-            call_count: s.call_count,
-            depth: s.depth,
-            parent_index: s.parent_index,
+    for distance in 1..session.function_samples.len() {
+        if idx >= distance {
+            if let Some(prev) = build_frame_functions(idx - distance) {
+                return Ok(Some(prev));
+            }
         }
-    }).collect();
 
-    Ok(Some(device_profile::PerFrameFunctions { frame_index, functions }))
+        let next_idx = idx + distance;
+        if let Some(next) = build_frame_functions(next_idx) {
+            return Ok(Some(next));
+        }
+    }
+
+    Ok(None)
 }
 
 #[tauri::command]
@@ -3552,12 +3588,22 @@ pub async fn run_ai_device_analysis(
 
     emit_ai_log(&app, &format!("[设备性能AI分析] 文件: {} | prompt长度: {} 字符", session_name, prompt.len()));
 
-    let runtime_dir = build_ai_runtime_dir()?;
-    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
-    let codex_cd = if cli_name == "codex" { Some(runtime_dir_str.as_str()) } else { None };
+    // Use project root as working directory when available, falling back to temp dir
+    let project_path = {
+        let project = cloned_project_info(&state)?;
+        project.map(|p| p.path.clone())
+    };
+    let workdir = if let Some(ref pp) = project_path {
+        let p = PathBuf::from(pp);
+        if p.is_dir() { p } else { build_ai_runtime_dir()? }
+    } else {
+        build_ai_runtime_dir()?
+    };
+    let workdir_str = workdir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(workdir_str.as_str()) } else { None };
     let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
 
-    let raw = run_cli_streaming(&cli_name, &invocation, &app, &runtime_dir.to_string_lossy())
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &workdir.to_string_lossy())
         .await
         .map_err(|e| {
             emit_ai_log(&app, &format!("[设备性能AI分析错误] {}", e));
@@ -3578,12 +3624,343 @@ pub async fn run_ai_device_analysis(
     })
 }
 
+#[tauri::command]
+pub async fn run_ai_module_analysis(
+    file_path: String,
+    module_name: String,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DeviceAiAnalysis, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    let module = crate::module_analysis::generate_module_analysis(&session, &module_name)?;
+
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let report = device_profile::generate_report(&session, &session_name);
+    let mut prompt = build_module_ai_prompt(&module, &session_name);
+
+    let graph_context = {
+        let project = cloned_project_info(&state)?;
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        if let Some(project) = project.as_ref() {
+            build_code_graph_context(&graph, &project.path, &report)
+        } else {
+            String::new()
+        }
+    };
+
+    if !graph_context.is_empty() {
+        prompt.push_str("\n\n### Code Graph Context (Static Analysis)\n");
+        prompt.push_str(&graph_context);
+    }
+
+    emit_ai_log(&app, &format!("[模块AI分析] 会话: {} | 模块: {} | prompt长度: {}", session_name, module.module_label, prompt.len()));
+
+    let project_path = {
+        let project = cloned_project_info(&state)?;
+        project.map(|p| p.path.clone())
+    };
+    let workdir = if let Some(ref pp) = project_path {
+        let p = PathBuf::from(pp);
+        if p.is_dir() { p } else { build_ai_runtime_dir()? }
+    } else {
+        build_ai_runtime_dir()?
+    };
+    let workdir_str = workdir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(workdir_str.as_str()) } else { None };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &workdir.to_string_lossy())
+        .await
+        .map_err(|e| {
+            emit_ai_log(&app, &format!("[模块AI分析错误] {}", e));
+            e
+        })?;
+
+    if raw.trim().is_empty() {
+        return Err("AI CLI returned empty result".to_string());
+    }
+
+    emit_ai_log(&app, &format!("[模块AI分析完成] 模块: {} | 响应长度: {}", module.module_label, raw.len()));
+
+    Ok(DeviceAiAnalysis {
+        session_name: module.module_label,
+        overall_grade: report.overall_grade,
+        analysis: raw,
+        timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn run_ai_device_chat(
+    file_path: String,
+    user_prompt: String,
+    context: Option<String>,
+    history: Option<String>,
+    cli_name: String,
+    model: Option<String>,
+    thinking: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DeviceAiAnalysis, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let report = device_profile::generate_report(&session, &session_name);
+    let mut prompt = build_device_chat_prompt(&report, &user_prompt, context.as_deref(), history.as_deref());
+
+    let graph_context = {
+        let project = cloned_project_info(&state)?;
+        let graph = state.graph.lock().map_err(|e| e.to_string())?;
+        if let Some(project) = project.as_ref() {
+            build_code_graph_context(&graph, &project.path, &report)
+        } else {
+            String::new()
+        }
+    };
+
+    if !graph_context.is_empty() {
+        prompt.push_str("\n\n### Code Graph Context (Static Analysis)\n");
+        prompt.push_str(&graph_context);
+    }
+
+    emit_ai_log(&app, &format!("[设备对话AI] 会话: {} | 问题: {}", session_name, user_prompt));
+
+    let project_path = {
+        let project = cloned_project_info(&state)?;
+        project.map(|p| p.path.clone())
+    };
+    let workdir = if let Some(ref pp) = project_path {
+        let p = PathBuf::from(pp);
+        if p.is_dir() { p } else { build_ai_runtime_dir()? }
+    } else {
+        build_ai_runtime_dir()?
+    };
+    let workdir_str = workdir.to_string_lossy().to_string();
+    let codex_cd = if cli_name == "codex" { Some(workdir_str.as_str()) } else { None };
+    let invocation = build_cli_invocation(&cli_name, &prompt, &model, &thinking, codex_cd)?;
+
+    let raw = run_cli_streaming(&cli_name, &invocation, &app, &workdir.to_string_lossy())
+        .await
+        .map_err(|e| {
+            emit_ai_log(&app, &format!("[设备对话AI错误] {}", e));
+            e
+        })?;
+
+    if raw.trim().is_empty() {
+        return Err("AI CLI returned empty result".to_string());
+    }
+
+    emit_ai_log(&app, &format!("[设备对话AI完成] 响应长度: {}", raw.len()));
+
+    Ok(DeviceAiAnalysis {
+        session_name,
+        overall_grade: report.overall_grade,
+        analysis: raw,
+        timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceAiAnalysis {
     pub session_name: String,
     pub overall_grade: String,
     pub analysis: String,
     pub timestamp: String,
+}
+
+fn build_module_ai_prompt(
+    module: &crate::module_analysis::ModulePageAnalysis,
+    session_name: &str,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("你是一位资深游戏性能优化专家。请只分析下面这个单模块，不要泛泛而谈整个报告。\n\n");
+    prompt.push_str(&format!("会话: {}\n", session_name));
+    prompt.push_str(&format!("模块: {}\n", module.module_label));
+    prompt.push_str(&format!("平均耗时: {:.2}ms\n", module.avg_module_ms));
+    prompt.push_str(&format!("最大耗时: {:.2}ms\n", module.max_module_ms));
+    prompt.push_str(&format!("总CPU占比: {:.1}%\n", module.percentage_of_total));
+    prompt.push_str(&format!("采样帧数: {}\n", module.sampled_frames));
+    prompt.push_str(&format!("具备函数采样: {}\n\n", module.function_sampling_enabled));
+
+    prompt.push_str("模块关键指标:\n");
+    for entry in &module.metrics.entries {
+        prompt.push_str(&format!("- {}: {} ({})\n", entry.label, entry.value, entry.severity));
+    }
+
+    if !module.sub_timelines.is_empty() {
+        prompt.push_str("\n子时间线:\n");
+        for st in &module.sub_timelines {
+            prompt.push_str(&format!("- {}: avg={:.2}ms, max={:.2}ms\n", st.name, st.avg_ms, st.max_ms));
+        }
+    }
+
+    if !module.top_functions.is_empty() {
+        prompt.push_str("\nTop 函数:\n");
+        for func in module.top_functions.iter().take(25) {
+            prompt.push_str(&format!(
+                "- {}: avgSelf={:.3}ms, totalSelf={:.2}ms, avgTotal={:.3}ms, calls/frame={:.1}, frames={}\n",
+                func.name,
+                func.avg_self_ms,
+                func.total_self_ms,
+                func.avg_total_ms,
+                func.calls_per_frame,
+                func.frames_called
+            ));
+        }
+    } else {
+        prompt.push_str("\n该模块没有函数级样本，请在结论中明确标注这一限制。\n");
+    }
+
+    prompt.push_str("\n请输出:\n1. 这个模块的主要瓶颈判断\n2. 最值得优先处理的 3-5 个点\n3. 结合函数样本和指标给出具体优化建议\n4. 对结论的确定性说明（哪些是高置信，哪些只是推测）\n\n使用简体中文，结构化输出。");
+    prompt
+}
+
+fn build_device_chat_prompt(
+    report: &device_profile::DeviceProfileReport,
+    user_prompt: &str,
+    context: Option<&str>,
+    history: Option<&str>,
+) -> String {
+    let mut prompt = device_profile::build_ai_prompt(report);
+    prompt.push_str("\n\n### 对话上下文\n");
+    if let Some(context) = context.filter(|v| !v.trim().is_empty()) {
+        prompt.push_str("当前面板上下文:\n");
+        prompt.push_str(context);
+        prompt.push('\n');
+    }
+    if let Some(history) = history.filter(|v| !v.trim().is_empty()) {
+        prompt.push_str("\n最近对话:\n");
+        prompt.push_str(history);
+        prompt.push('\n');
+    }
+    prompt.push_str("\n用户当前问题:\n");
+    prompt.push_str(user_prompt);
+    prompt.push_str("\n\n请直接回答用户当前问题，必要时引用上面的性能数据。使用简体中文。");
+    prompt
+}
+
+// ======================== Extended Device Profiling Commands ========================
+
+/// Get module-specific analysis for a device profiling session
+#[tauri::command]
+pub async fn get_module_analysis(
+    file_path: String,
+    module_name: String,
+) -> Result<crate::module_analysis::ModulePageAnalysis, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    crate::module_analysis::generate_module_analysis(&session, &module_name)
+}
+
+/// Get resource memory analysis
+#[tauri::command]
+pub async fn get_resource_memory_analysis(
+    file_path: String,
+) -> Result<crate::module_analysis::ResourceMemoryAnalysis, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    Ok(crate::module_analysis::generate_resource_memory_analysis(&session))
+}
+
+/// Build call tree for a device profiling session
+#[tauri::command]
+pub async fn get_call_tree(
+    file_path: String,
+    category_filter: Option<u8>,
+    frame_start: Option<u32>,
+    frame_end: Option<u32>,
+    direction: Option<String>,
+    top_n: Option<usize>,
+) -> Result<Vec<crate::call_tree::CallTreeNode>, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    let cat = category_filter.map(device_profile::FunctionCategory::from_u8);
+    let dir = direction.as_deref().unwrap_or("forward");
+    let n = Some(top_n.unwrap_or(50));
+    Ok(crate::call_tree::build_call_tree(&session, cat, frame_start, frame_end, dir, n))
+}
+
+/// Search functions across all sampled frames
+#[tauri::command]
+pub async fn search_device_functions(
+    file_path: String,
+    query: String,
+) -> Result<Vec<crate::call_tree::FunctionSearchResult>, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    Ok(crate::call_tree::search_functions(&session, &query))
+}
+
+/// Save a device report for later retrieval
+#[tauri::command]
+pub async fn save_device_report(
+    file_path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
+    let session = device_profile::parse_gaprof(&data)?;
+    let session_name = PathBuf::from(&file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+    let mut report = device_profile::generate_report(&session, &session_name);
+    report.source_file_path = Some(file_path.clone());
+    let project = cloned_project_info(&state)?;
+    let project_path = project.as_ref()
+        .map(|p| p.path.clone())
+        .ok_or("No project loaded")?;
+    crate::report_history::save_report(&project_path, &report)
+}
+
+/// List saved device reports
+#[tauri::command]
+pub async fn list_device_reports(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::report_history::ReportMeta>, String> {
+    let project = cloned_project_info(&state)?;
+    let project_path = project.as_ref()
+        .map(|p| p.path.clone())
+        .ok_or("No project loaded")?;
+    crate::report_history::list_reports(&project_path)
+}
+
+/// Get a saved device report by ID
+#[tauri::command]
+pub async fn get_saved_device_report(
+    report_id: String,
+    state: State<'_, AppState>,
+) -> Result<device_profile::DeviceProfileReport, String> {
+    let project = cloned_project_info(&state)?;
+    let project_path = project.as_ref()
+        .map(|p| p.path.clone())
+        .ok_or("No project loaded")?;
+    crate::report_history::get_report(&project_path, &report_id)
+}
+
+/// Delete a saved device report
+#[tauri::command]
+pub async fn delete_device_report(
+    report_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let project = cloned_project_info(&state)?;
+    let project_path = project.as_ref()
+        .map(|p| p.path.clone())
+        .ok_or("No project loaded")?;
+    crate::report_history::delete_report(&project_path, &report_id)
 }
 
 /// Build code graph context for the AI prompt based on profiler bottlenecks

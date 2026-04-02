@@ -3,8 +3,107 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../api/tauri';
 import type { DeviceProfileReport, DeviceStatus, DiscoveredDevice, RemoteSession, TimelinePoint, FunctionAnalysis, FunctionStats, LogAnalysis, PerFrameFunctions, DeviceAiAnalysis } from '../api/tauri';
 import { useAppStore } from '../store';
+import AiChatPanel from '../components/device/AiChatPanel';
+import ReportOverview from '../components/device/pages/ReportOverview';
+import ReportRuntimeInfo from '../components/device/pages/ReportRuntimeInfo';
+import ReportModuleOverview from '../components/device/pages/ReportModuleOverview';
+import ReportCallStacks from '../components/device/pages/ReportCallStacks';
+import ReportModuleRendering from '../components/device/pages/ReportModuleRendering';
+import ReportModuleGPUSync from '../components/device/pages/ReportModuleGPUSync';
+import ReportModuleScripting from '../components/device/pages/ReportModuleScripting';
+import ReportModuleUI from '../components/device/pages/ReportModuleUI';
+import ReportModuleLoading from '../components/device/pages/ReportModuleLoading';
+import ReportModulePhysics from '../components/device/pages/ReportModulePhysics';
+import ReportModuleAnimation from '../components/device/pages/ReportModuleAnimation';
+import ReportModuleParticle from '../components/device/pages/ReportModuleParticle';
+import ReportGPU from '../components/device/pages/ReportGPU';
+import ReportJank from '../components/device/pages/ReportJank';
+import ReportMemory from '../components/device/pages/ReportMemory';
+import ReportBattery from '../components/device/pages/ReportBattery';
+import ReportTemperature from '../components/device/pages/ReportTemperature';
+import ReportLogs from '../components/device/pages/ReportLogs';
+import ReportCustomModules from '../components/device/pages/ReportCustomModules';
+import ReportScreenshots from '../components/device/pages/ReportScreenshots';
+import ReportHistory from '../components/device/pages/ReportHistory';
 
 type TabKey = 'device' | 'report';
+type ReportPage = 'overview' | 'runtime_info' | 'module_overview' | 'call_stacks'
+  | 'module_rendering' | 'module_gpu_sync' | 'module_scripting' | 'module_ui'
+  | 'module_loading' | 'module_physics' | 'module_animation' | 'module_particles'
+  | 'gpu' | 'jank' | 'memory' | 'battery' | 'temperature' | 'logs'
+  | 'custom_modules' | 'screenshots' | 'history';
+
+interface SidebarItem {
+  key: ReportPage;
+  label: string;
+  icon: string;
+}
+
+interface SidebarGroup {
+  label: string;
+  items: SidebarItem[];
+  collapsible?: boolean;
+}
+
+const sidebarGroups: SidebarGroup[] = [
+  {
+    label: '概览',
+    items: [
+      { key: 'overview', label: '性能简报', icon: '📊' },
+      { key: 'runtime_info', label: '运行信息', icon: '📱' },
+    ],
+  },
+  {
+    label: 'CPU 分析',
+    items: [
+      { key: 'module_overview', label: '模块耗时统计', icon: '⚙️' },
+      { key: 'call_stacks', label: 'CPU调用堆栈', icon: '📋' },
+      { key: 'module_rendering', label: '渲染模块', icon: '🎨' },
+      { key: 'module_gpu_sync', label: 'GPU同步模块', icon: '🔄' },
+      { key: 'module_scripting', label: '逻辑代码模块', icon: '💻' },
+      { key: 'module_ui', label: 'UI模块', icon: '🖼️' },
+      { key: 'module_loading', label: '加载模块', icon: '📦' },
+      { key: 'module_physics', label: '物理系统', icon: '⚡' },
+      { key: 'module_animation', label: '动画模块', icon: '🎬' },
+      { key: 'module_particles', label: '粒子系统', icon: '✨' },
+      { key: 'custom_modules', label: '自定义模块', icon: '🔧' },
+    ],
+  },
+  {
+    label: '内存',
+    collapsible: true,
+    items: [
+      { key: 'memory', label: '内存分析', icon: '🧠' },
+    ],
+  },
+  {
+    label: 'GPU',
+    items: [
+      { key: 'gpu', label: 'GPU分析', icon: '🖥️' },
+    ],
+  },
+  {
+    label: '稳定性',
+    items: [
+      { key: 'jank', label: '卡顿分析', icon: '⚡' },
+      { key: 'logs', label: '运行日志', icon: '📋' },
+    ],
+  },
+  {
+    label: '设备',
+    items: [
+      { key: 'battery', label: '耗电量', icon: '🔋' },
+      { key: 'temperature', label: '温度变化', icon: '🌡️' },
+      { key: 'screenshots', label: '截图', icon: '📸' },
+    ],
+  },
+  {
+    label: '工具',
+    items: [
+      { key: 'history', label: '历史报告', icon: '📁' },
+    ],
+  },
+];
 
 type LiveDeviceFrame = {
   timestamp: number;
@@ -428,6 +527,8 @@ export default function DeviceProfile() {
   const [sessionName, setSessionName] = useState('');
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [reportPage, setReportPage] = useState<ReportPage>('overview');
+  const [showAiPanel, setShowAiPanel] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -472,8 +573,29 @@ export default function DeviceProfile() {
       setFilePath(downloadedPath);
       const generated = await api.generateDeviceReport(downloadedPath);
       setReport(generated);
+      try {
+        await api.saveDeviceReport(downloadedPath);
+      } catch {
+        // History is project-scoped; ignore when no project is loaded.
+      }
       setTab('report');
       setMessage(`${t('device.autoOpenedReport', '已自动打开报告: ')}${downloadedPath.split(/[\\/]/).pop()}`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  const openSavedReport = useCallback(async (reportId: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const saved = await api.getSavedDeviceReport(reportId);
+      setReport(saved);
+      setFilePath(saved.source_file_path || '');
+      setTab('report');
+      setMessage(`${t('device.autoOpenedReport', '已打开历史报告: ')}${saved.session_name}`);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -831,217 +953,81 @@ export default function DeviceProfile() {
               </button>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <div className="card" style={{ padding: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <h2 style={{ margin: 0, color: '#fff' }}>{report.session_name}</h2>
-                  <div style={{ color: '#888', fontSize: 12, marginTop: 4 }}>
-                    {report.device_info.device_model} · {report.device_info.operating_system} · {report.device_info.graphics_device_name}
-                  </div>
-                  <div style={{ color: '#666', fontSize: 11, marginTop: 2 }}>
-                    {report.device_info.unity_version} · {report.device_info.platform} · {report.device_info.screen_width}×{report.device_info.screen_height} · {report.total_frames} frames · {report.duration_seconds.toFixed(1)}s
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <GradeBadge grade={report.overall_grade} />
-                  <button className="btn-secondary" onClick={handleExport}>📤 {t('device.export', '导出报告')}</button>
-                  <button className="btn-secondary" onClick={handleImport}>📁 {t('device.loadAnother', '加载其它')}</button>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <StatCard
-                  label="Avg FPS"
-                  value={report.summary.avg_fps.toFixed(1)}
-                  sub={`P5: ${report.summary.p5_fps.toFixed(0)} / P95: ${report.summary.p95_fps.toFixed(0)}`}
-                  color={report.summary.avg_fps >= 55 ? '#0f0' : report.summary.avg_fps >= 30 ? '#fa0' : '#f44'}
-                />
-                <StatCard label="CPU" value={`${report.summary.avg_cpu_ms.toFixed(1)}ms`} />
-                <StatCard label="GPU" value={`${report.summary.avg_gpu_ms.toFixed(1)}ms`} />
-                <StatCard
-                  label={t('device.peakMem', '峰值内存')}
-                  value={`${report.summary.peak_memory_mb.toFixed(0)}MB`}
-                  color={report.summary.peak_memory_mb > 2048 ? '#f44' : report.summary.peak_memory_mb > 1024 ? '#fa0' : '#0cf'}
-                />
-                <StatCard label="GC Alloc" value={`${report.summary.total_gc_alloc_mb.toFixed(1)}MB`} />
-                <StatCard
-                  label={t('device.jank', '卡顿')}
-                  value={`${report.summary.jank_count}`}
-                  sub={`${report.summary.jank_rate.toFixed(1)}%`}
-                  color={report.summary.jank_count > 10 ? '#f44' : report.summary.jank_count > 0 ? '#fa0' : '#0f0'}
-                />
-                <StatCard
-                  label={t('device.stability', '稳定性')}
-                  value={`${(report.summary.fps_stability * 100).toFixed(0)}%`}
-                  color={report.summary.fps_stability > 0.9 ? '#0f0' : report.summary.fps_stability > 0.7 ? '#fa0' : '#f44'}
-                />
-              </div>
-
-              <div className="card" style={{ padding: 16 }}>
-                <h3 style={{ margin: '0 0 12px', color: '#00e0ff' }}>📊 FPS {t('device.analysis', '分析')}</h3>
-                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-                  <div style={{ flex: 2, minWidth: 300 }}>
-                    <TimelineChart data={report.fps_analysis.fps_timeline} color="#00e0ff" label="FPS Timeline" unit=" fps" />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 200 }}>
-                    <div style={{ fontSize: 12, color: '#aaa', marginBottom: 4 }}>FPS Distribution</div>
-                    <FpsHistogram buckets={report.fps_analysis.fps_histogram} />
+            <div style={{ display: 'flex', gap: 0, height: 'calc(100vh - 160px)' }}>
+              {/* Sidebar */}
+              <div style={{ width: 200, background: '#0d0d1a', borderRight: '1px solid #222', overflowY: 'auto', flexShrink: 0, paddingTop: 8 }}>
+                {/* Device info header */}
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid #222', marginBottom: 4 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: '#ccc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{report.session_name}</div>
+                  <div style={{ fontSize: 10, color: '#888' }}>{report.device_info.device_model}</div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 4, fontSize: 10, color: '#666' }}>
+                    <span>{report.overall_grade}</span>
+                    <span>{report.summary.avg_fps.toFixed(0)} fps</span>
+                    <span>{report.total_frames}f</span>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 12, color: '#aaa' }}>
-                  <span>Target: {report.fps_analysis.target_fps} FPS</span>
-                  <span>Below target: {report.fps_analysis.frames_below_target} ({report.fps_analysis.below_target_pct.toFixed(1)}%)</span>
-                  <span>Below 30: {report.fps_analysis.frames_below_30} ({report.fps_analysis.below_30_pct.toFixed(1)}%)</span>
-                </div>
-              </div>
 
-              <div className="card" style={{ padding: 16 }}>
-                <h3 style={{ margin: '0 0 12px', color: '#7c4dff' }}>🧠 {t('device.memory', '内存')}</h3>
-                <TimelineChart data={report.memory_analysis.memory_timeline} color="#7c4dff" label={t('device.memTimeline', '内存时间线')} unit=" MB" />
-                <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 12, color: '#aaa', flexWrap: 'wrap' }}>
-                  <span>Peak: {report.memory_analysis.peak_total_mb.toFixed(0)} MB</span>
-                  <span>Avg: {report.memory_analysis.avg_total_mb.toFixed(0)} MB</span>
-                  <span>Mono Peak: {report.memory_analysis.peak_mono_mb.toFixed(0)} MB</span>
-                  <span>GFX Peak: {report.memory_analysis.peak_gfx_mb.toFixed(0)} MB</span>
-                  <span>GC/frame: {report.memory_analysis.gc_alloc_per_frame_bytes.toFixed(0)} B</span>
-                  <span>
-                    Trend:{' '}
-                    <span style={{ color: report.memory_analysis.memory_trend === 'stable' ? '#0f0' : '#fa0' }}>
-                      {report.memory_analysis.memory_trend}
-                    </span>
-                  </span>
-                  {report.memory_analysis.memory_growth_rate_mb_per_min > 0.1 && (
-                    <span style={{ color: '#f44' }}>
-                      +{report.memory_analysis.memory_growth_rate_mb_per_min.toFixed(1)} MB/min
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="card" style={{ padding: 16 }}>
-                <h3 style={{ margin: '0 0 8px', color: '#ff9800' }}>⚙️ {t('device.modules', '模块耗时')}</h3>
-                <div style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
-                  Bottleneck:{' '}
-                  <span style={{ color: '#ff9800', fontWeight: 'bold' }}>{report.module_analysis.bottleneck}</span>
-                </div>
-                <HorizontalBar items={report.module_analysis.module_breakdown} />
-              </div>
-
-              <div className="card" style={{ padding: 16 }}>
-                <h3 style={{ margin: '0 0 12px', color: '#00bcd4' }}>🎨 {t('device.rendering', '渲染')}</h3>
-                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 13 }}>
-                  <div>Draw Calls: <b>{report.rendering_analysis.avg_draw_calls.toFixed(0)}</b> (max {report.rendering_analysis.max_draw_calls})</div>
-                  <div>Batches: <b>{report.rendering_analysis.avg_batches.toFixed(0)}</b></div>
-                  <div>Triangles: <b>{(report.rendering_analysis.avg_triangles / 1000).toFixed(0)}K</b> (max {(report.rendering_analysis.max_triangles / 1000).toFixed(0)}K)</div>
-                  <div>SetPass: <b>{report.rendering_analysis.avg_set_pass.toFixed(0)}</b></div>
-                  <div>
-                    Batching:{' '}
-                    <b style={{ color: report.rendering_analysis.batching_efficiency > 0.5 ? '#0f0' : '#fa0' }}>
-                      {(report.rendering_analysis.batching_efficiency * 100).toFixed(0)}%
-                    </b>
-                  </div>
-                </div>
-              </div>
-
-              <div className="card" style={{ padding: 16 }}>
-                <h3 style={{ margin: '0 0 12px', color: '#f44336' }}>⚡ {t('device.jankAnalysis', '卡顿分析')}</h3>
-                {report.jank_analysis.jank_timeline.length > 0 && (
-                  <TimelineChart data={report.jank_analysis.jank_timeline} color="#f44336" label={t('device.jankTimeline', '卡顿时间线')} unit=" ms" />
-                )}
-                <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12, color: '#aaa' }}>
-                  <span>Jank: {report.jank_analysis.total_jank_frames} ({report.jank_analysis.jank_rate_pct.toFixed(1)}%)</span>
-                  <span>Severe: {report.jank_analysis.severe_jank_frames} ({report.jank_analysis.severe_jank_rate_pct.toFixed(1)}%)</span>
-                  <span>Worst: {report.jank_analysis.worst_frame_ms.toFixed(1)}ms @ frame #{report.jank_analysis.worst_frame_index}</span>
-                </div>
-              </div>
-
-              {report.thermal_analysis.has_data && (
-                <div className="card" style={{ padding: 16 }}>
-                  <h3 style={{ margin: '0 0 12px', color: '#ff5722' }}>🌡️ {t('device.thermal', '温度与电量')}</h3>
-                  {report.thermal_analysis.temperature_timeline.length > 0 && (
-                    <TimelineChart data={report.thermal_analysis.temperature_timeline} color="#ff5722" label={t('device.tempTimeline', '温度时间线')} unit="°C" />
-                  )}
-                  <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12, color: '#aaa' }}>
-                    <span>Avg: {report.thermal_analysis.avg_temperature.toFixed(1)}°C</span>
-                    <span>Max: {report.thermal_analysis.max_temperature.toFixed(1)}°C</span>
-                    <span>Battery drain: {report.thermal_analysis.battery_drain.toFixed(1)}%</span>
-                    <span>
-                      Throttle risk:{' '}
-                      <span style={{ color: report.thermal_analysis.thermal_throttle_risk === 'low' ? '#0f0' : '#f44' }}>
-                        {report.thermal_analysis.thermal_throttle_risk}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {report.overdraw_analysis && (
-                <div className="card" style={{ padding: 16 }}>
-                  <h3 style={{ margin: '0 0 12px', color: '#9c27b0' }}>🔲 Overdraw</h3>
-                  <div style={{ fontSize: 13 }}>
-                    Avg:{' '}
-                    <b style={{ color: report.overdraw_analysis.avg_overdraw > 3 ? '#f44' : '#0f0' }}>
-                      {report.overdraw_analysis.avg_overdraw.toFixed(2)}x
-                    </b>{' '}
-                    · Max: <b>{report.overdraw_analysis.max_overdraw.toFixed(2)}x</b> · Samples: {report.overdraw_analysis.sample_count}
-                  </div>
-                </div>
-              )}
-
-              {report.function_analysis?.has_data && (
-                <FunctionAnalysisSection analysis={report.function_analysis} filePath={filePath} />
-              )}
-
-              {report.log_analysis?.has_data && (
-                <LogAnalysisSection analysis={report.log_analysis} />
-              )}
-
-              <AiDeviceSection filePath={filePath} report={report} />
-
-              {report.scene_breakdown.length > 0 && (
-                <div className="card" style={{ padding: 16 }}>
-                  <h3 style={{ margin: '0 0 12px', color: '#4caf50' }}>🎬 {t('device.scenes', '场景分布')}</h3>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                    <thead>
-                      <tr style={{ color: '#888' }}>
-                        <th style={{ textAlign: 'left', padding: '4px 8px' }}>{t('device.scene', '场景')}</th>
-                        <th style={{ textAlign: 'right', padding: '4px 8px' }}>{t('device.frames', '帧数')}</th>
-                        <th style={{ textAlign: 'right', padding: '4px 8px' }}>Avg FPS</th>
-                        <th style={{ textAlign: 'right', padding: '4px 8px' }}>Avg Mem</th>
-                        <th style={{ textAlign: 'right', padding: '4px 8px' }}>{t('device.jank', '卡顿')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {report.scene_breakdown.map(scene => (
-                        <tr key={scene.scene_name} style={{ borderTop: '1px solid #222' }}>
-                          <td style={{ padding: '4px 8px' }}>{scene.scene_name}</td>
-                          <td style={{ padding: '4px 8px', textAlign: 'right', color: '#aaa' }}>{scene.frame_count}</td>
-                          <td style={{ padding: '4px 8px', textAlign: 'right', color: scene.avg_fps >= 55 ? '#0f0' : '#fa0' }}>{scene.avg_fps.toFixed(1)}</td>
-                          <td style={{ padding: '4px 8px', textAlign: 'right', color: '#aaa' }}>{scene.avg_memory_mb.toFixed(0)} MB</td>
-                          <td style={{ padding: '4px 8px', textAlign: 'right', color: scene.jank_count > 0 ? '#fa0' : '#888' }}>{scene.jank_count}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {report.screenshot_count > 0 && (
-                <div className="card" style={{ padding: 16 }}>
-                  <h3 style={{ margin: '0 0 12px', color: '#03a9f4' }}>📸 {t('device.screenshots', '截图')} ({report.screenshot_count})</h3>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {report.screenshot_frame_indices.map(index => (
-                      <button key={index} className="btn-secondary" onClick={() => void handleScreenshot(index)} style={{ fontSize: 11, padding: '4px 12px' }}>
-                        Frame #{index}
-                      </button>
+                {sidebarGroups.map(group => (
+                  <div key={group.label} style={{ marginBottom: 2 }}>
+                    <div style={{ padding: '4px 12px', fontSize: 10, color: '#666', textTransform: 'uppercase', letterSpacing: 1 }}>{group.label}</div>
+                    {group.items.map(item => (
+                      <div key={item.key} onClick={() => setReportPage(item.key)}
+                        style={{
+                          padding: '5px 12px', fontSize: 12, cursor: 'pointer', display: 'flex', gap: 6, alignItems: 'center',
+                          background: reportPage === item.key ? '#16213e' : 'transparent',
+                          color: reportPage === item.key ? '#4fc3f7' : '#aaa',
+                          borderLeft: reportPage === item.key ? '2px solid #4fc3f7' : '2px solid transparent',
+                        }}>
+                        <span style={{ fontSize: 12 }}>{item.icon}</span>
+                        <span>{item.label}</span>
+                      </div>
                     ))}
                   </div>
-                  {screenshotData && screenshotFrame !== null && (
-                    <div style={{ marginTop: 12 }}>
-                      <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>Frame #{screenshotFrame}</div>
-                      <img src={`data:image/jpeg;base64,${screenshotData}`} alt={`Frame ${screenshotFrame}`} style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid #333' }} />
-                    </div>
-                  )}
+                ))}
+
+                {/* Toolbar */}
+                <div style={{ padding: '12px', borderTop: '1px solid #222', marginTop: 8 }}>
+                  <button onClick={handleImport} style={{ width: '100%', padding: '4px 0', fontSize: 11, background: '#1a1a2e', color: '#aaa', border: '1px solid #333', borderRadius: 4, cursor: 'pointer', marginBottom: 4 }}>
+                    📁 加载其它
+                  </button>
+                  <button onClick={handleExport} style={{ width: '100%', padding: '4px 0', fontSize: 11, background: '#1a1a2e', color: '#aaa', border: '1px solid #333', borderRadius: 4, cursor: 'pointer', marginBottom: 4 }}>
+                    📤 导出报告
+                  </button>
+                  <button onClick={() => setShowAiPanel(!showAiPanel)} style={{ width: '100%', padding: '4px 0', fontSize: 11, background: showAiPanel ? '#7c4dff' : '#1a1a2e', color: showAiPanel ? '#fff' : '#aaa', border: '1px solid #333', borderRadius: 4, cursor: 'pointer' }}>
+                    🤖 AI 分析
+                  </button>
+                </div>
+              </div>
+
+              {/* Main content */}
+              <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+                {reportPage === 'overview' && <ReportOverview report={report} onNavigate={(p) => setReportPage(p as ReportPage)} />}
+                {reportPage === 'runtime_info' && <ReportRuntimeInfo report={report} />}
+                {reportPage === 'module_overview' && <ReportModuleOverview report={report} onNavigate={(p) => setReportPage(p as ReportPage)} />}
+                {reportPage === 'call_stacks' && <ReportCallStacks filePath={filePath} />}
+                {reportPage === 'module_rendering' && <ReportModuleRendering filePath={filePath} />}
+                {reportPage === 'module_gpu_sync' && <ReportModuleGPUSync filePath={filePath} />}
+                {reportPage === 'module_scripting' && <ReportModuleScripting filePath={filePath} />}
+                {reportPage === 'module_ui' && <ReportModuleUI filePath={filePath} />}
+                {reportPage === 'module_loading' && <ReportModuleLoading filePath={filePath} />}
+                {reportPage === 'module_physics' && <ReportModulePhysics filePath={filePath} />}
+                {reportPage === 'module_animation' && <ReportModuleAnimation filePath={filePath} />}
+                {reportPage === 'module_particles' && <ReportModuleParticle filePath={filePath} />}
+                {reportPage === 'gpu' && <ReportGPU filePath={filePath} />}
+                {reportPage === 'jank' && <ReportJank filePath={filePath} report={report} />}
+                {reportPage === 'memory' && <ReportMemory filePath={filePath} report={report} />}
+                {reportPage === 'battery' && <ReportBattery report={report} />}
+                {reportPage === 'temperature' && <ReportTemperature report={report} />}
+                {reportPage === 'logs' && <ReportLogs report={report} />}
+                {reportPage === 'custom_modules' && <ReportCustomModules filePath={filePath} />}
+                {reportPage === 'screenshots' && <ReportScreenshots filePath={filePath} report={report} />}
+                {reportPage === 'history' && <ReportHistory onLoadReport={(reportId) => { void openSavedReport(reportId); }} />}
+              </div>
+
+              {/* AI Chat Panel */}
+              {showAiPanel && (
+                <div style={{ width: 360, borderLeft: '1px solid #222', flexShrink: 0 }}>
+                  <AiChatPanel filePath={filePath} context={`Report grade: ${report.overall_grade}, Avg FPS: ${report.summary.avg_fps.toFixed(1)}, Peak Mem: ${report.summary.peak_memory_mb.toFixed(0)}MB, Jank: ${report.summary.jank_count}`} />
                 </div>
               )}
             </div>

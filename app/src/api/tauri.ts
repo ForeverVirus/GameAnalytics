@@ -500,6 +500,7 @@ export interface PerFrameFunction {
   call_count: number;
   depth: number;
   parent_index: number;
+  thread_index: number;
 }
 
 export interface PerFrameFunctions {
@@ -533,9 +534,11 @@ export interface LogEntry {
 export interface LogAnalysis {
   has_data: boolean;
   total_logs: number;
+  info_count: number;
   error_count: number;
   warning_count: number;
   exception_count: number;
+  top_info: LogSummaryEntry[];
   top_errors: LogSummaryEntry[];
   top_warnings: LogSummaryEntry[];
 }
@@ -709,14 +712,58 @@ export const api = {
   exportDeviceReport: (report: DeviceProfileReport) =>
     invoke<string>('export_device_report', { report }),
 
-  getFrameFunctions: (filePath: string, frameIndex: number) =>
-    invoke<PerFrameFunctions | null>('get_frame_functions', { filePath, frameIndex }),
+  getFrameFunctions: (filePath: string, frameIndex: number, categoryFilters?: number[], preferNearest?: boolean) =>
+    invoke<PerFrameFunctions | null>('get_frame_functions', {
+      filePath,
+      frameIndex,
+      categoryFilters: categoryFilters ?? null,
+      preferNearest: preferNearest ?? null,
+    }),
 
   getSessionLogs: (filePath: string, logTypeFilter?: number, limit?: number) =>
     invoke<LogEntry[]>('get_session_logs', { filePath, logTypeFilter: logTypeFilter ?? null, limit: limit ?? null }),
 
   runAiDeviceAnalysis: (filePath: string, cliName: string, model?: string, thinking?: string) =>
     invoke<DeviceAiAnalysis>('run_ai_device_analysis', { filePath, cliName, model: model ?? null, thinking: thinking ?? null }),
+
+  runAiModuleAnalysis: (filePath: string, moduleName: string, cliName: string, model?: string, thinking?: string) =>
+    invoke<DeviceAiAnalysis>('run_ai_module_analysis', { filePath, moduleName, cliName, model: model ?? null, thinking: thinking ?? null }),
+
+  runAiDeviceChat: (filePath: string, userPrompt: string, context?: string, history?: string, cliName?: string, model?: string, thinking?: string) =>
+    invoke<DeviceAiAnalysis>('run_ai_device_chat', {
+      filePath,
+      userPrompt,
+      context: context ?? null,
+      history: history ?? null,
+      cliName: cliName ?? 'claude',
+      model: model ?? null,
+      thinking: thinking ?? null,
+    }),
+
+  // Extended Device Profiler APIs
+  getModuleAnalysis: (filePath: string, moduleName: string) =>
+    invoke<ModulePageAnalysis>('get_module_analysis', { filePath, moduleName }),
+
+  getResourceMemoryAnalysis: (filePath: string) =>
+    invoke<ResourceMemoryAnalysis>('get_resource_memory_analysis', { filePath }),
+
+  getCallTree: (filePath: string, categoryFilter?: number, frameStart?: number, frameEnd?: number, direction?: string, topN?: number) =>
+    invoke<CallTreeNode[]>('get_call_tree', { filePath, categoryFilter: categoryFilter ?? null, frameStart: frameStart ?? null, frameEnd: frameEnd ?? null, direction: direction ?? null, topN: topN ?? null }),
+
+  searchDeviceFunctions: (filePath: string, query: string) =>
+    invoke<FunctionSearchResult[]>('search_device_functions', { filePath, query }),
+
+  saveDeviceReport: (filePath: string) =>
+    invoke<string>('save_device_report', { filePath }),
+
+  listDeviceReports: () =>
+    invoke<ReportMeta[]>('list_device_reports'),
+
+  getSavedDeviceReport: (reportId: string) =>
+    invoke<DeviceProfileReport>('get_saved_device_report', { reportId }),
+
+  deleteDeviceReport: (reportId: string) =>
+    invoke<void>('delete_device_report', { reportId }),
 };
 
 export interface DeviceAiAnalysis {
@@ -724,6 +771,130 @@ export interface DeviceAiAnalysis {
   overall_grade: string;
   analysis: string;
   timestamp: string;
+}
+
+// Extended Device Profiler Types
+
+export interface ModulePageAnalysis {
+  module_name: string;
+  module_label: string;
+  timeline: TimelinePoint[];
+  sub_timelines: SubTimeline[];
+  top_functions: ModuleFunctionStats[];
+  metrics: ModuleMetrics;
+  sampled_frames: number;
+  avg_module_ms: number;
+  max_module_ms: number;
+  percentage_of_total: number;
+  function_sampling_enabled: boolean;
+}
+
+export interface SubTimeline {
+  name: string;
+  timeline: TimelinePoint[];
+  avg_ms: number;
+  max_ms: number;
+}
+
+export interface ModuleFunctionStats {
+  name: string;
+  avg_self_ms: number;
+  total_self_ms: number;
+  self_pct: number;
+  avg_total_ms: number;
+  total_total_ms: number;
+  total_pct: number;
+  call_count: number;
+  avg_call_count: number;
+  frames_called: number;
+  calls_per_frame: number;
+}
+
+export interface ModuleMetrics {
+  entries: MetricEntry[];
+}
+
+export interface MetricEntry {
+  label: string;
+  value: string;
+  severity: string;
+}
+
+export interface TimelinePoint {
+  time: number;
+  value: number;
+  frame_index?: number;
+}
+
+export interface ResourceMemoryAnalysis {
+  total_memory_timeline: TimelinePoint[];
+  mono_memory_timeline: TimelinePoint[];
+  gfx_memory_timeline: TimelinePoint[];
+  gc_alloc_timeline: TimelinePoint[];
+  peak_total_mb: number;
+  avg_total_mb: number;
+  peak_mono_mb: number;
+  peak_gfx_mb: number;
+  total_gc_alloc_mb: number;
+  gc_alloc_per_frame_kb: number;
+  memory_trend: string;
+  growth_rate_mb_per_min: number;
+  resource_types: ResourceTypeBreakdown[];
+}
+
+export interface ResourceTypeBreakdown {
+  type_name: string;
+  peak_mb: number;
+  avg_mb: number;
+  timeline: TimelinePoint[];
+  top_instances: ResourceInstance[];
+}
+
+export interface ResourceInstance {
+  name: string;
+  size_bytes: number;
+  size_label: string;
+}
+
+export interface CallTreeNode {
+  name: string;
+  category: string;
+  avg_self_ms: number;
+  total_self_ms: number;
+  self_pct: number;
+  avg_total_ms: number;
+  total_total_ms: number;
+  total_pct: number;
+  call_count: number;
+  avg_call_count: number;
+  frames_called: number;
+  calls_per_frame: number;
+  depth: number;
+  children: CallTreeNode[];
+}
+
+export interface FunctionSearchResult {
+  name: string;
+  category: string;
+  avg_self_ms: number;
+  total_self_ms: number;
+  avg_total_ms: number;
+  total_total_ms: number;
+  call_count: number;
+  frames_called: number;
+}
+
+export interface ReportMeta {
+  id: string;
+  session_name: string;
+  device_model: string;
+  overall_grade: string;
+  duration_seconds: number;
+  total_frames: number;
+  avg_fps: number;
+  peak_memory_mb: number;
+  timestamp: string;
+  source_file?: string | null;
 }
 
 export interface AnalysisProgress {

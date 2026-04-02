@@ -64,7 +64,7 @@ namespace GameAnalytics.Profiler
 
         [Header("Deep Profiling")]
         [Tooltip("Enable function-level deep profiling (captures per-function CPU timing for call stack analysis)")]
-        public bool enableDeepProfiling = false;
+        public bool enableDeepProfiling = true;
 
         [Tooltip("Enable runtime log capture during profiling")]
         public bool captureLogs = true;
@@ -72,6 +72,22 @@ namespace GameAnalytics.Profiler
         [Tooltip("Deep profiling sample rate: capture function data every N frames (higher = lower overhead)")]
         [Range(1, 10)]
         public int deepProfilingSampleRate = 1;
+
+        [Header("Resource Memory (v3)")]
+        [Tooltip("Enable per-resource-type memory tracking (Texture, Mesh, etc.)")]
+        public bool enableResourceMemory = false;
+
+        [Tooltip("Sample resource instances every N frames (higher = lower overhead)")]
+        [Range(1, 120)]
+        public int resourceSampleInterval = 30;
+
+        [Header("GPU Analysis (v3)")]
+        [Tooltip("Enable GPU utilization analysis via FrameTimingManager")]
+        public bool enableGPUAnalysis = false;
+
+        [Header("Custom Modules (v3)")]
+        [Tooltip("User-defined Profiler marker names to track as custom modules")]
+        public string[] customMarkerNames = new string[0];
     }
 }
 

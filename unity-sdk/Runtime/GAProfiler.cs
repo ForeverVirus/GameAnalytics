@@ -53,6 +53,11 @@ namespace GameAnalytics.Profiler
         private FunctionTimingCollector _functionTimingCollector;
         private LogCollector _logCollector;
 
+        // v3 collectors
+        private ResourceMemoryCollector _resourceMemoryCollector;
+        private GPUProfileCollector _gpuProfileCollector;
+        private CustomModuleCollector _customModuleCollector;
+
         private List<ICollector> _activeCollectors = new List<ICollector>();
 
         // Session data
@@ -126,6 +131,14 @@ namespace GameAnalytics.Profiler
             _functionTimingCollector = new FunctionTimingCollector();
             _logCollector = new LogCollector();
 
+            // v3 collectors
+            _resourceMemoryCollector = new ResourceMemoryCollector(
+                config.resourceSampleInterval);
+            _gpuProfileCollector = new GPUProfileCollector(config.targetFps);
+            _customModuleCollector = config.customMarkerNames != null && config.customMarkerNames.Length > 0
+                ? new CustomModuleCollector(config.customMarkerNames)
+                : null;
+
             _dataWriter = new ProfileDataWriter();
         }
 
@@ -193,6 +206,10 @@ namespace GameAnalytics.Profiler
                 _functionTimingCollector.Initialize(_session);
                 _functionTimingCollector.OnCaptureStart();
             }
+            else
+            {
+                Debug.LogWarning("[GAProfiler] Deep profiling is disabled. Function-level analysis and call stack views in the desktop app will be empty for this capture.");
+            }
 
             // Log capture
             if (config.captureLogs)
@@ -201,7 +218,29 @@ namespace GameAnalytics.Profiler
                 _logCollector.OnCaptureStart();
             }
 
-            Debug.Log($"[GAProfiler] Capture started: {_session.sessionName} (deep={config.enableDeepProfiling})");
+            // v3: Resource memory
+            if (config.enableResourceMemory)
+            {
+                _resourceMemoryCollector.Initialize(_session);
+                _resourceMemoryCollector.OnCaptureStart();
+                _activeCollectors.Add(_resourceMemoryCollector);
+            }
+
+            // v3: GPU analysis
+            if (config.enableGPUAnalysis)
+            {
+                _activeCollectors.Add(_gpuProfileCollector);
+            }
+
+            // v3: Custom modules
+            if (_customModuleCollector != null)
+            {
+                _customModuleCollector.Initialize(_session);
+                _customModuleCollector.OnCaptureStart();
+                _session.customMarkerNames.AddRange(config.customMarkerNames);
+            }
+
+            Debug.Log($"[GAProfiler] Capture started: {_session.sessionName} (deep={config.enableDeepProfiling}, deepSampleRate={Mathf.Max(1, config.deepProfilingSampleRate)}, logs={config.captureLogs}, resourceMemory={config.enableResourceMemory}, gpuAnalysis={config.enableGPUAnalysis})");
             OnCaptureStarted?.Invoke();
         }
 
@@ -222,6 +261,16 @@ namespace GameAnalytics.Profiler
                 _functionTimingCollector.OnCaptureStop();
             if (config.captureLogs)
                 _logCollector.OnCaptureStop();
+
+            // v3: save resource snapshots to session
+            if (config.enableResourceMemory && _resourceMemoryCollector != null)
+            {
+                _session.resourceSnapshots.AddRange(_resourceMemoryCollector.Snapshots);
+            }
+
+            // v3: stop custom modules
+            if (_customModuleCollector != null)
+                _customModuleCollector.OnCaptureStop();
 
             State = CaptureState.Exporting;
             Debug.Log($"[GAProfiler] Capture stopped. {_session.frames.Count} frames, {_session.duration:F1}s");
@@ -270,6 +319,15 @@ namespace GameAnalytics.Profiler
             if (config.enableDeepProfiling && _framesSinceCapture % Mathf.Max(1, config.deepProfilingSampleRate) == 0)
             {
                 var samples = _functionTimingCollector.CollectSamples();
+
+                // v3: merge custom module samples
+                if (_customModuleCollector != null)
+                {
+                    var customSamples = _customModuleCollector.CollectSamples();
+                    if (customSamples.Count > 0)
+                        samples.AddRange(customSamples);
+                }
+
                 _session.frameFunctionSamples.Add(samples);
             }
             else

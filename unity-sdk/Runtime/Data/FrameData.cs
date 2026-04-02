@@ -24,7 +24,8 @@ namespace GameAnalytics.Profiler.Data
         Sync = 7,        // GPU sync / present wait
         Overhead = 8,
         GC = 9,
-        Other = 10
+        Other = 10,
+        Custom = 11
     }
 
     /// <summary>
@@ -41,6 +42,7 @@ namespace GameAnalytics.Profiler.Data
         public ushort callCount;
         public byte depth;               // call stack depth (0 = root)
         public short parentIndex;        // -1 = root, else index into this frame's sample list
+        public byte threadIndex;         // v3: 0=Main, 1=Render, 2+=Job threads
     }
 
     /// <summary>
@@ -110,6 +112,23 @@ namespace GameAnalytics.Profiler.Data
 
         // Scene (index into string table)
         public ushort sceneIndex;
+
+        // === v3 fields ===
+
+        // Per-resource-type memory (bytes)
+        public long textureMemory;
+        public long meshMemory;
+        public long materialMemory;
+        public long shaderMemory;
+        public long animClipMemory;
+        public long audioClipMemory;
+        public long fontMemory;
+        public long renderTextureMemory;
+        public long particleSystemMemory;
+
+        // GPU metrics
+        public float gpuUtilization;   // 0..1 (gpuFrameTime / budget)
+        public float cpuFrequencyMhz;  // CPU main thread time proxy
     }
 
     /// <summary>
@@ -214,6 +233,12 @@ namespace GameAnalytics.Profiler.Data
         // Config snapshot
         public bool deepProfilingEnabled;
         public int targetFps = 60;
+
+        // v3: Resource memory snapshots (detailed per-type/per-instance)
+        public List<Collectors.ResourceMemorySnapshot> resourceSnapshots = new List<Collectors.ResourceMemorySnapshot>();
+
+        // v3: Custom module marker names (for reference)
+        public List<string> customMarkerNames = new List<string>();
 
         public ushort GetOrAddString(string s)
         {

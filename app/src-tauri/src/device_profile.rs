@@ -9,11 +9,15 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 // ======================== Data Structures ========================
 
 const MAGIC: &[u8; 6] = b"GAPROF";
-const FRAME_BYTE_SIZE: usize = 157;
+const FRAME_BYTE_SIZE_V2: usize = 155;
+const FRAME_BYTE_SIZE_V3: usize = 235; // v3: +9 resource memory i64 (72) + 2 × f32 (8) = +80 bytes
 
 // Module flag bits (must match C# ModuleFlags)
 const FLAG_FUNCTION_SAMPLES: u32 = 1 << 8;
 const FLAG_LOG_ENTRIES: u32 = 1 << 9;
+const FLAG_RESOURCE_MEMORY: u32 = 1 << 10;
+const FLAG_GPU_ANALYSIS: u32 = 1 << 11;
+const FLAG_CUSTOM_MODULE: u32 = 1 << 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GaprofHeader {
@@ -109,6 +113,19 @@ pub struct FrameData {
     pub temperature: f32,
     // Scene
     pub scene_index: u16,
+    // V3: Resource memory (MB)
+    pub texture_memory: f32,
+    pub mesh_memory: f32,
+    pub material_memory: f32,
+    pub shader_memory: f32,
+    pub anim_clip_memory: f32,
+    pub audio_clip_memory: f32,
+    pub font_memory: f32,
+    pub render_texture_memory: f32,
+    pub particle_system_memory: f32,
+    // V3: GPU
+    pub gpu_utilization: f32,
+    pub cpu_frequency: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,10 +158,11 @@ pub enum FunctionCategory {
     Overhead = 8,
     GC = 9,
     Other = 10,
+    Custom = 11,
 }
 
 impl FunctionCategory {
-    fn from_u8(v: u8) -> Self {
+    pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Rendering,
             1 => Self::Scripting,
@@ -156,6 +174,7 @@ impl FunctionCategory {
             7 => Self::Sync,
             8 => Self::Overhead,
             9 => Self::GC,
+            11 => Self::Custom,
             _ => Self::Other,
         }
     }
@@ -173,6 +192,7 @@ impl FunctionCategory {
             Self::Overhead => "引擎开销",
             Self::GC => "GC",
             Self::Other => "其他",
+            Self::Custom => "自定义模块",
         }
     }
 }
@@ -186,13 +206,14 @@ pub struct FunctionSample {
     pub call_count: u16,
     pub depth: u8,
     pub parent_index: i16,
+    pub thread_index: u8, // V3: 0=Main, 1=Render, 2+=Job threads
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub timestamp: f32,
     pub frame_index: i32,
-    pub log_type: u8, // 0=Log, 1=Warning, 2=Error, 3=Assert, 4=Exception
+    pub log_type: u8, // Unity LogType raw enum: 0=Error, 1=Assert, 2=Warning, 3=Log, 4=Exception
     pub message: String,
     pub stack_trace: String,
 }
@@ -231,22 +252,23 @@ pub fn parse_gaprof(data: &[u8]) -> Result<GaprofSession, String> {
         .map_err(|e| format!("Seek frames: {}", e))?;
     let mut frames = Vec::with_capacity(header.frame_count as usize);
     for _ in 0..header.frame_count {
-        frames.push(read_frame(&mut cursor)?);
+        frames.push(read_frame(&mut cursor, header.version)?);
     }
 
-    // Read screenshots
-    cursor.seek(SeekFrom::Start(header.screenshot_index_offset))
-        .map_err(|e| format!("Seek screenshots: {}", e))?;
-    let screenshots = read_screenshots(&mut cursor)?;
+    // Some SDK builds wrote incorrect screenshot/overdraw offsets in the header.
+    // The blocks are still laid out sequentially after frame data, so use the
+    // actual post-frame cursor position as the canonical start of the screenshot block.
+    let screenshot_block_offset = cursor.position();
+    let (screenshots, overdraw_block_offset) = read_screenshots(data, screenshot_block_offset, header.screenshot_count)?;
 
-    // Read overdraw
-    cursor.seek(SeekFrom::Start(header.overdraw_offset))
+    // Overdraw follows the screenshot block immediately.
+    cursor.seek(SeekFrom::Start(overdraw_block_offset))
         .map_err(|e| format!("Seek overdraw: {}", e))?;
     let overdraw_samples = read_overdraw(&mut cursor)?;
 
     // V2: Read function samples
     let function_samples = if header.version >= 2 && (header.module_flags & FLAG_FUNCTION_SAMPLES) != 0 {
-        read_function_samples(&mut cursor)?
+        read_function_samples(&mut cursor, header.version)?
     } else {
         Vec::new()
     };
@@ -313,8 +335,8 @@ fn read_string_table(cursor: &mut Cursor<&[u8]>) -> Result<Vec<String>, String> 
     Ok(table)
 }
 
-fn read_frame(cursor: &mut Cursor<&[u8]>) -> Result<FrameData, String> {
-    let frame = FrameData {
+fn read_frame(cursor: &mut Cursor<&[u8]>, version: u16) -> Result<FrameData, String> {
+    let mut frame = FrameData {
         timestamp: read_f32(cursor)?,
         delta_time: read_f32(cursor)?,
         fps: read_f32(cursor)?,
@@ -349,44 +371,144 @@ fn read_frame(cursor: &mut Cursor<&[u8]>) -> Result<FrameData, String> {
         battery_level: read_f32(cursor)?,
         temperature: read_f32(cursor)?,
         scene_index: read_u16(cursor)?,
+        // V3 defaults
+        texture_memory: 0.0,
+        mesh_memory: 0.0,
+        material_memory: 0.0,
+        shader_memory: 0.0,
+        anim_clip_memory: 0.0,
+        audio_clip_memory: 0.0,
+        font_memory: 0.0,
+        render_texture_memory: 0.0,
+        particle_system_memory: 0.0,
+        gpu_utilization: 0.0,
+        cpu_frequency: 0.0,
     };
-    // Skip 2-byte pad
-    let mut pad = [0u8; 2];
-    let _ = cursor.read_exact(&mut pad);
+    // V3 extended frame data (no padding; v2 had 2-byte pad that was removed in v3)
+    if version >= 3 {
+        // Resource memory: 9 × i64 (bytes) → convert to f32 (MB)
+        frame.texture_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.mesh_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.material_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.shader_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.anim_clip_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.audio_clip_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.font_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.render_texture_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        frame.particle_system_memory = read_i64(cursor)? as f32 / 1_048_576.0;
+        // GPU metrics: 2 × f32
+        frame.gpu_utilization = read_f32(cursor)?;
+        frame.cpu_frequency = read_f32(cursor)?;
+    } else {
+        // V2: skip 2-byte alignment pad
+        let mut pad = [0u8; 2];
+        let _ = cursor.read_exact(&mut pad);
+    }
+
     Ok(frame)
 }
 
-fn read_screenshots(cursor: &mut Cursor<&[u8]>) -> Result<Vec<ScreenshotEntry>, String> {
-    let count = read_u16(cursor)? as usize;
+fn read_screenshots(
+    data: &[u8],
+    index_offset: u64,
+    expected_count: u16,
+) -> Result<(Vec<ScreenshotEntry>, u64), String> {
+    struct IndexEntry {
+        frame_index: u32,
+        offset: u64,
+        size: u32,
+    }
 
-    // Read index entries
-    struct IndexEntry { frame_index: u32, offset: u64, size: u32 }
+    let data_len = data.len() as u64;
+    let mut cursor = Cursor::new(data);
+    cursor.seek(SeekFrom::Start(index_offset))
+        .map_err(|e| format!("Seek screenshots: {}", e))?;
+
+    let count = read_u16(&mut cursor)? as usize;
+    if count > 10_000 {
+        return Err(format!("Too many screenshots: {}", count));
+    }
+    if expected_count > 0 && count != expected_count as usize {
+        return Err(format!(
+            "Screenshot count mismatch: header={}, block={}",
+            expected_count, count
+        ));
+    }
+
     let mut index = Vec::with_capacity(count);
     for _ in 0..count {
         index.push(IndexEntry {
-            frame_index: read_u32(cursor)?,
-            offset: read_u64(cursor)?,
-            size: read_u32(cursor)?,
+            frame_index: read_u32(&mut cursor)?,
+            offset: read_u64(&mut cursor)?,
+            size: read_u32(&mut cursor)?,
         });
     }
 
-    // Read actual data
+    let data_start = index_offset
+        .checked_add(2)
+        .and_then(|v| v.checked_add(count as u64 * 16))
+        .ok_or_else(|| "Screenshot block offset overflow".to_string())?;
+    if data_start > data_len {
+        return Err("Screenshot block starts beyond file size".into());
+    }
+
+    let sequential_end = index.iter().try_fold(data_start, |acc, entry| {
+        acc.checked_add(entry.size as u64)
+            .ok_or_else(|| "Screenshot block size overflow".to_string())
+    })?;
+    if sequential_end > data_len {
+        return Err("Screenshot data exceeds file size".into());
+    }
+
+    let stored_offsets_valid = index
+        .iter()
+        .scan(data_start, |prev_end, entry| {
+            let start = entry.offset;
+            let end = entry.offset.saturating_add(entry.size as u64);
+            let valid = start >= *prev_end && end <= data_len;
+            *prev_end = end;
+            Some(valid)
+        })
+        .all(|valid| valid);
+
     let mut screenshots = Vec::with_capacity(count);
-    for entry in &index {
-        cursor.seek(SeekFrom::Start(entry.offset))
-            .map_err(|e| format!("Seek screenshot: {}", e))?;
-        let mut data = vec![0u8; entry.size as usize];
-        cursor.read_exact(&mut data).map_err(|e| format!("Read screenshot: {}", e))?;
+    let mut next_offset = data_start;
+    let mut block_end = data_start;
+
+    for entry in index {
+        let actual_offset = if stored_offsets_valid {
+            entry.offset
+        } else {
+            let offset = next_offset;
+            next_offset = next_offset
+                .checked_add(entry.size as u64)
+                .ok_or_else(|| "Screenshot offset overflow".to_string())?;
+            offset
+        };
+        let end = actual_offset
+            .checked_add(entry.size as u64)
+            .ok_or_else(|| "Screenshot end offset overflow".to_string())?;
+        if end > data_len {
+            return Err("Screenshot data out of bounds".into());
+        }
+
+        let start = actual_offset as usize;
+        let end = end as usize;
         screenshots.push(ScreenshotEntry {
             frame_index: entry.frame_index,
-            jpeg_data: data,
+            jpeg_data: data[start..end].to_vec(),
         });
+        block_end = block_end.max(actual_offset + entry.size as u64);
     }
-    Ok(screenshots)
+
+    Ok((screenshots, block_end))
 }
 
 fn read_overdraw(cursor: &mut Cursor<&[u8]>) -> Result<Vec<OverdrawSample>, String> {
     let count = read_u16(cursor)? as usize;
+    if count > 10_000 {
+        return Err(format!("Too many overdraw samples: {}", count));
+    }
     let mut samples = Vec::with_capacity(count);
     for _ in 0..count {
         let frame_index = read_u32(cursor)?;
@@ -405,21 +527,30 @@ fn read_overdraw(cursor: &mut Cursor<&[u8]>) -> Result<Vec<OverdrawSample>, Stri
     Ok(samples)
 }
 
-fn read_function_samples(cursor: &mut Cursor<&[u8]>) -> Result<Vec<Vec<FunctionSample>>, String> {
+fn read_function_samples(cursor: &mut Cursor<&[u8]>, version: u16) -> Result<Vec<Vec<FunctionSample>>, String> {
     let frame_count = read_u32(cursor)? as usize;
     let mut all_frames = Vec::with_capacity(frame_count);
     for _ in 0..frame_count {
         let sample_count = read_u16(cursor)? as usize;
         let mut samples = Vec::with_capacity(sample_count);
         for _ in 0..sample_count {
+            let function_name_index = read_u16(cursor)?;
+            let category = FunctionCategory::from_u8(read_u8(cursor)?);
+            let self_time_ms = read_f32(cursor)?;
+            let total_time_ms = read_f32(cursor)?;
+            let call_count = read_u16(cursor)?;
+            let depth = read_u8(cursor)?;
+            let parent_index = read_i16(cursor)?;
+            let thread_index = if version >= 3 { read_u8(cursor)? } else { 0 };
             samples.push(FunctionSample {
-                function_name_index: read_u16(cursor)?,
-                category: FunctionCategory::from_u8(read_u8(cursor)?),
-                self_time_ms: read_f32(cursor)?,
-                total_time_ms: read_f32(cursor)?,
-                call_count: read_u16(cursor)?,
-                depth: read_u8(cursor)?,
-                parent_index: read_i16(cursor)?,
+                function_name_index,
+                category,
+                self_time_ms,
+                total_time_ms,
+                call_count,
+                depth,
+                parent_index,
+                thread_index,
             });
         }
         all_frames.push(samples);
@@ -506,6 +637,148 @@ fn read_f64(c: &mut Cursor<&[u8]>) -> Result<f64, String> {
     Ok(f64::from_le_bytes(buf))
 }
 
+fn build_frame_timeline<F>(frames: &[FrameData], sample_step: usize, extractor: F) -> Vec<TimelinePoint>
+where
+    F: Fn(&FrameData) -> f32,
+{
+    frames
+        .iter()
+        .enumerate()
+        .step_by(sample_step.max(1))
+        .map(|(idx, frame)| TimelinePoint {
+            time: frame.timestamp,
+            value: extractor(frame),
+            frame_index: Some(idx as u32),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_gaprof;
+
+    fn push_u8(buf: &mut Vec<u8>, value: u8) {
+        buf.push(value);
+    }
+
+    fn push_u16(buf: &mut Vec<u8>, value: u16) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i32(buf: &mut Vec<u8>, value: i32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_f32(buf: &mut Vec<u8>, value: f32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_f64(buf: &mut Vec<u8>, value: f64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn build_broken_v3_gaprof() -> Vec<u8> {
+        let mut data = Vec::new();
+
+        let device_info_bytes = br#"{}"#;
+        let frame_data_offset = 64 + 4 + device_info_bytes.len() as u64 + 2;
+        let frame_size_v3 = 235u64;
+        let broken_frame_size = 157u64;
+        let frame_count = 1u32;
+        let screenshot_count = 1u16;
+
+        let actual_screenshot_index_offset = frame_data_offset + frame_size_v3;
+        let broken_screenshot_index_offset = frame_data_offset + broken_frame_size;
+        let screenshot_block_size = 2 + 16u64;
+        let actual_screenshot_data_offset = actual_screenshot_index_offset + screenshot_block_size;
+        let broken_screenshot_data_offset = broken_screenshot_index_offset + screenshot_block_size;
+
+        let screenshot_bytes = [1u8, 2, 3];
+        let actual_overdraw_offset = actual_screenshot_data_offset + screenshot_bytes.len() as u64;
+        let broken_overdraw_offset = broken_screenshot_data_offset + screenshot_bytes.len() as u64;
+        let heatmap_bytes = [4u8, 5];
+
+        data.extend_from_slice(b"GAPROF");
+        push_u16(&mut data, 3);
+        push_u32(&mut data, 0);
+        push_u32(&mut data, frame_count);
+        push_f64(&mut data, 1.0);
+        push_u16(&mut data, screenshot_count);
+        push_u64(&mut data, 64);
+        push_u64(&mut data, frame_data_offset);
+        push_u64(&mut data, broken_screenshot_index_offset);
+        push_u64(&mut data, broken_overdraw_offset);
+        data.resize(64, 0);
+
+        push_i32(&mut data, device_info_bytes.len() as i32);
+        data.extend_from_slice(device_info_bytes);
+
+        push_u16(&mut data, 0);
+
+        // One zeroed v3 frame.
+        for _ in 0..17 {
+            push_f32(&mut data, 0.0);
+        }
+        for _ in 0..6 {
+            data.extend_from_slice(&0i64.to_le_bytes());
+        }
+        for _ in 0..7 {
+            push_i32(&mut data, 0);
+        }
+        push_u8(&mut data, 0);
+        push_f32(&mut data, 0.0);
+        push_f32(&mut data, 0.0);
+        push_u16(&mut data, 0);
+        for _ in 0..9 {
+            data.extend_from_slice(&0i64.to_le_bytes());
+        }
+        push_f32(&mut data, 0.0);
+        push_f32(&mut data, 0.0);
+
+        assert_eq!(data.len() as u64, actual_screenshot_index_offset);
+
+        push_u16(&mut data, 1);
+        push_u32(&mut data, 0);
+        push_u64(&mut data, broken_screenshot_data_offset);
+        push_u32(&mut data, screenshot_bytes.len() as u32);
+
+        assert_eq!(data.len() as u64, actual_screenshot_data_offset);
+        data.extend_from_slice(&screenshot_bytes);
+
+        assert_eq!(data.len() as u64, actual_overdraw_offset);
+        push_u16(&mut data, 1);
+        push_u32(&mut data, 0);
+        push_f32(&mut data, 1.0);
+        push_f32(&mut data, 2.0);
+        push_u32(&mut data, heatmap_bytes.len() as u32);
+        data.extend_from_slice(&heatmap_bytes);
+
+        data
+    }
+
+    #[test]
+    fn parse_gaprof_recovers_from_broken_v3_block_offsets() {
+        let data = build_broken_v3_gaprof();
+        let session = parse_gaprof(&data).expect("parser should recover from broken offsets");
+
+        assert_eq!(session.frames.len(), 1);
+        assert_eq!(session.screenshots.len(), 1);
+        assert_eq!(session.screenshots[0].frame_index, 0);
+        assert_eq!(session.screenshots[0].jpeg_data, vec![1, 2, 3]);
+        assert_eq!(session.overdraw_samples.len(), 1);
+        assert_eq!(session.overdraw_samples[0].frame_index, 0);
+        assert_eq!(session.overdraw_samples[0].heatmap_jpeg.as_deref(), Some(&[4, 5][..]));
+    }
+}
+
 // ======================== Analysis & Report ========================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,6 +847,8 @@ pub struct FpsBucket {
 pub struct TimelinePoint {
     pub time: f32,
     pub value: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -700,15 +975,18 @@ pub struct PerFrameFunction {
     pub call_count: u16,
     pub depth: u8,
     pub parent_index: i16,
+    pub thread_index: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogAnalysis {
     pub has_data: bool,
     pub total_logs: usize,
+    pub info_count: usize,
     pub error_count: usize,
     pub warning_count: usize,
     pub exception_count: usize,
+    pub top_info: Vec<LogSummaryEntry>,
     pub top_errors: Vec<LogSummaryEntry>,
     pub top_warnings: Vec<LogSummaryEntry>,
 }
@@ -817,9 +1095,7 @@ pub fn generate_report(session: &GaprofSession, session_name: &str) -> DevicePro
 
     // Timeline (sample every N frames for manageable size)
     let sample_step = (total as usize / 500).max(1);
-    let fps_timeline: Vec<TimelinePoint> = frames.iter().step_by(sample_step)
-        .map(|f| TimelinePoint { time: f.timestamp, value: f.fps })
-        .collect();
+    let fps_timeline = build_frame_timeline(frames, sample_step, |f| f.fps);
 
     let fps_analysis = FpsAnalysis {
         target_fps,
@@ -836,9 +1112,7 @@ pub fn generate_report(session: &GaprofSession, session_name: &str) -> DevicePro
     let peak_gfx = frames.iter().map(|f| f.gfx_memory).max().unwrap_or(0) as f32 / (1024.0 * 1024.0);
     let gc_per_frame = if total > 0 { frames.iter().map(|f| f.gc_alloc_bytes).sum::<i64>() as f32 / total as f32 } else { 0.0 };
 
-    let memory_timeline: Vec<TimelinePoint> = frames.iter().step_by(sample_step)
-        .map(|f| TimelinePoint { time: f.timestamp, value: f.total_allocated as f32 / (1024.0 * 1024.0) })
-        .collect();
+    let memory_timeline = build_frame_timeline(frames, sample_step, |f| f.total_allocated as f32 / (1024.0 * 1024.0));
 
     // Memory trend: compare first 10% avg to last 10% avg
     let ten_pct = (total as usize / 10).max(1);
@@ -954,8 +1228,9 @@ pub fn generate_report(session: &GaprofSession, session_name: &str) -> DevicePro
         .unwrap_or((0, 0.0));
 
     let jank_timeline: Vec<TimelinePoint> = frames.iter()
-        .filter(|f| f.jank_level >= 1)
-        .map(|f| TimelinePoint { time: f.timestamp, value: f.delta_time * 1000.0 })
+        .enumerate()
+        .filter(|(_, f)| f.jank_level >= 1)
+        .map(|(idx, f)| TimelinePoint { time: f.timestamp, value: f.delta_time * 1000.0, frame_index: Some(idx as u32) })
         .collect();
 
     let jank_analysis = JankAnalysis {
@@ -979,9 +1254,11 @@ pub fn generate_report(session: &GaprofSession, session_name: &str) -> DevicePro
 
     let throttle_risk = if max_temp > 45.0 { "high" } else if max_temp > 38.0 { "medium" } else { "low" };
 
-    let temp_timeline: Vec<TimelinePoint> = frames.iter().step_by(sample_step)
-        .filter(|f| f.temperature > 0.0)
-        .map(|f| TimelinePoint { time: f.timestamp, value: f.temperature })
+    let temp_timeline: Vec<TimelinePoint> = frames.iter()
+        .enumerate()
+        .step_by(sample_step)
+        .filter(|(_, f)| f.temperature > 0.0)
+        .map(|(idx, f)| TimelinePoint { time: f.timestamp, value: f.temperature, frame_index: Some(idx as u32) })
         .collect();
 
     let thermal_analysis = ThermalAnalysis {
@@ -1165,6 +1442,7 @@ fn generate_function_analysis(session: &GaprofSession) -> Option<FunctionAnalysi
                     call_count: s.call_count,
                     depth: s.depth,
                     parent_index: s.parent_index,
+                    thread_index: s.thread_index,
                 }
             }).collect();
             PerFrameFunctions { frame_index: frame_idx as u32, functions }
@@ -1184,13 +1462,26 @@ fn generate_log_analysis(session: &GaprofSession) -> Option<LogAnalysis> {
         return None;
     }
 
-    let error_count = session.log_entries.iter().filter(|l| l.log_type == 2 || l.log_type == 3).count();
-    let warning_count = session.log_entries.iter().filter(|l| l.log_type == 1).count();
-    let exception_count = session.log_entries.iter().filter(|l| l.log_type == 4).count();
+    let info_count = session.log_entries.iter().filter(|l| is_info_log_type(l.log_type)).count();
+    let error_count = session.log_entries.iter().filter(|l| is_error_log_type(l.log_type)).count();
+    let warning_count = session.log_entries.iter().filter(|l| is_warning_log_type(l.log_type)).count();
+    let exception_count = session.log_entries.iter().filter(|l| is_exception_log_type(l.log_type)).count();
+
+    let mut info_groups: HashMap<String, (usize, i32, u8)> = HashMap::new();
+    for log in session.log_entries.iter().filter(|l| is_info_log_type(l.log_type)) {
+        let key = log.message.lines().next().unwrap_or(&log.message).to_string();
+        let entry = info_groups.entry(key).or_insert((0, log.frame_index, log.log_type));
+        entry.0 += 1;
+    }
+    let mut top_info: Vec<LogSummaryEntry> = info_groups.into_iter().map(|(msg, (count, first_frame, lt))| {
+        LogSummaryEntry { message: msg, count, first_frame, log_type: lt }
+    }).collect();
+    top_info.sort_by(|a, b| b.count.cmp(&a.count));
+    top_info.truncate(20);
 
     // Group errors by message (first line)
     let mut error_groups: HashMap<String, (usize, i32, u8)> = HashMap::new();
-    for log in session.log_entries.iter().filter(|l| l.log_type == 2 || l.log_type == 3 || l.log_type == 4) {
+    for log in session.log_entries.iter().filter(|l| is_error_log_type(l.log_type) || is_exception_log_type(l.log_type)) {
         let key = log.message.lines().next().unwrap_or(&log.message).to_string();
         let entry = error_groups.entry(key).or_insert((0, log.frame_index, log.log_type));
         entry.0 += 1;
@@ -1203,7 +1494,7 @@ fn generate_log_analysis(session: &GaprofSession) -> Option<LogAnalysis> {
 
     // Group warnings
     let mut warn_groups: HashMap<String, (usize, i32, u8)> = HashMap::new();
-    for log in session.log_entries.iter().filter(|l| l.log_type == 1) {
+    for log in session.log_entries.iter().filter(|l| is_warning_log_type(l.log_type)) {
         let key = log.message.lines().next().unwrap_or(&log.message).to_string();
         let entry = warn_groups.entry(key).or_insert((0, log.frame_index, log.log_type));
         entry.0 += 1;
@@ -1217,12 +1508,30 @@ fn generate_log_analysis(session: &GaprofSession) -> Option<LogAnalysis> {
     Some(LogAnalysis {
         has_data: true,
         total_logs: session.log_entries.len(),
+        info_count,
         error_count,
         warning_count,
         exception_count,
+        top_info,
         top_errors,
         top_warnings,
     })
+}
+
+fn is_error_log_type(log_type: u8) -> bool {
+    matches!(log_type, 0 | 1)
+}
+
+fn is_warning_log_type(log_type: u8) -> bool {
+    log_type == 2
+}
+
+fn is_info_log_type(log_type: u8) -> bool {
+    log_type == 3
+}
+
+fn is_exception_log_type(log_type: u8) -> bool {
+    log_type == 4
 }
 
 fn compute_grade(

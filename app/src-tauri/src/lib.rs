@@ -1,12 +1,15 @@
 mod ai_review;
 mod analysis;
 mod asset_metrics;
+mod call_tree;
 mod commands;
 mod device_profile;
 mod device_transfer;
 mod graph;
+mod module_analysis;
 mod profiler_report;
 mod profiler_session;
+mod report_history;
 mod unity_connection;
 mod workspace;
 
@@ -80,6 +83,17 @@ pub fn run() {
             commands::get_frame_functions,
             commands::get_session_logs,
             commands::run_ai_device_analysis,
+            commands::run_ai_module_analysis,
+            commands::run_ai_device_chat,
+            // Extended device profiler commands
+            commands::get_module_analysis,
+            commands::get_resource_memory_analysis,
+            commands::get_call_tree,
+            commands::search_device_functions,
+            commands::save_device_report,
+            commands::list_device_reports,
+            commands::get_saved_device_report,
+            commands::delete_device_report,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

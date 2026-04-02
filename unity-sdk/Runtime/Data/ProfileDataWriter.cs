@@ -25,7 +25,7 @@ namespace GameAnalytics.Profiler.Data
     {
         // Magic bytes
         private static readonly byte[] Magic = Encoding.ASCII.GetBytes("GAPROF");
-        private const ushort FormatVersion = 2;
+        private const ushort FormatVersion = 3;
 
         // Module flag bits
         [Flags]
@@ -41,10 +41,14 @@ namespace GameAnalytics.Profiler.Data
             Overdraw     = 1 << 7,
             FunctionSamples = 1 << 8,
             LogEntries   = 1 << 9,
+            ResourceMemory = 1 << 10,
+            GPUAnalysis  = 1 << 11,
+            CustomModules= 1 << 12,
         }
 
-        // Per-frame binary size: 4+4+4+4+4 + 12*4 + 6*8 + 7*4 + 1 + 4+4 + 2 = 157 bytes
-        private const int FrameByteSize = 157;
+        // Per-frame binary size for v3:
+        // 155-byte base frame + 9 x i64 resource memory (72) + 2 x f32 GPU metrics (8) = 235 bytes
+        private const int FrameByteSize = 235;
 
         public void Write(CaptureSession session, string filePath, Action<float> onProgress = null)
         {
@@ -174,6 +178,7 @@ namespace GameAnalytics.Profiler.Data
                             bw.Write(s.callCount);            // u16
                             bw.Write(s.depth);                // u8
                             bw.Write(s.parentIndex);          // i16
+                            bw.Write(s.threadIndex);          // u8 (v3)
                         }
                     }
                 }
@@ -194,6 +199,12 @@ namespace GameAnalytics.Profiler.Data
                         bw.Write((ushort)stBytes.Length);
                         bw.Write(stBytes);
                     }
+                }
+
+                // ---- Write ResourceMemory Block (v3) ----
+                if (session.resourceSnapshots.Count > 0)
+                {
+                    WriteResourceMemoryBlock(bw, session);
                 }
 
                 onProgress?.Invoke(1f);
@@ -250,10 +261,18 @@ namespace GameAnalytics.Profiler.Data
             // Scene index (u16 = 2 bytes)
             bw.Write(f.sceneIndex);
 
-            // Total: 20 + 48 + 48 + 28 + 1 + 8 + 2 = 155 bytes
-            // Pad to 157 for alignment
-            bw.Write((byte)0);
-            bw.Write((byte)0);
+            // v3 fields: 9 × i64 (72 bytes) + 2 × f32 (8 bytes) = 80 bytes
+            bw.Write(f.textureMemory);
+            bw.Write(f.meshMemory);
+            bw.Write(f.materialMemory);
+            bw.Write(f.shaderMemory);
+            bw.Write(f.animClipMemory);
+            bw.Write(f.audioClipMemory);
+            bw.Write(f.fontMemory);
+            bw.Write(f.renderTextureMemory);
+            bw.Write(f.particleSystemMemory);
+            bw.Write(f.gpuUtilization);
+            bw.Write(f.cpuFrequencyMhz);
         }
 
         private uint GetFlags(CaptureSession session)
@@ -274,7 +293,45 @@ namespace GameAnalytics.Profiler.Data
             if (session.overdrawSamples.Count > 0) flags |= (uint)ModuleFlags.Overdraw;
             if (session.deepProfilingEnabled && session.frameFunctionSamples.Count > 0) flags |= (uint)ModuleFlags.FunctionSamples;
             if (session.logEntries.Count > 0) flags |= (uint)ModuleFlags.LogEntries;
+            if (session.resourceSnapshots.Count > 0) flags |= (uint)ModuleFlags.ResourceMemory;
+            if (session.frames.Count > 0 && session.frames[0].gpuUtilization > 0) flags |= (uint)ModuleFlags.GPUAnalysis;
+            if (session.customMarkerNames.Count > 0) flags |= (uint)ModuleFlags.CustomModules;
             return flags;
+        }
+
+        /// <summary>
+        /// Writes the resource memory detail block after log entries.
+        /// Called from Write() after the main blocks.
+        /// </summary>
+        private void WriteResourceMemoryBlock(BinaryWriter bw, CaptureSession session)
+        {
+            var snapshots = session.resourceSnapshots;
+            bw.Write((uint)snapshots.Count);
+            foreach (var snap in snapshots)
+            {
+                bw.Write((uint)snap.frameIndex);
+                bw.Write(snap.totalMemory);
+
+                WriteResourceList(bw, snap.textures, session);
+                WriteResourceList(bw, snap.meshes, session);
+                WriteResourceList(bw, snap.materials, session);
+                WriteResourceList(bw, snap.shaders, session);
+                WriteResourceList(bw, snap.animClips, session);
+                WriteResourceList(bw, snap.audioClips, session);
+                WriteResourceList(bw, snap.fonts, session);
+                WriteResourceList(bw, snap.renderTextures, session);
+                WriteResourceList(bw, snap.particleSystems, session);
+            }
+        }
+
+        private void WriteResourceList(BinaryWriter bw, System.Collections.Generic.List<Collectors.ResourceInstanceInfo> instances, CaptureSession session)
+        {
+            bw.Write((ushort)instances.Count);
+            foreach (var inst in instances)
+            {
+                bw.Write(session.GetOrAddString(inst.name ?? "<unnamed>"));
+                bw.Write(inst.sizeBytes);
+            }
         }
     }
 }

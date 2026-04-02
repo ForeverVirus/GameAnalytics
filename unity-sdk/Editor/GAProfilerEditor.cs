@@ -64,6 +64,10 @@ namespace GameAnalytics.Profiler.Editor
         private SerializedProperty _overdrawSampleInterval, _overdrawShader;
         private SerializedProperty _enableWifiTransfer, _httpServerPort;
         private SerializedProperty _autoStartCapture, _autoStartSessionName;
+        private SerializedProperty _enableDeepProfiling, _captureLogs, _deepProfilingSampleRate;
+        private SerializedProperty _enableResourceMemory, _resourceSampleInterval;
+        private SerializedProperty _enableGPUAnalysis;
+        private SerializedProperty _customMarkerNames;
 
         private void OnEnable()
         {
@@ -86,6 +90,13 @@ namespace GameAnalytics.Profiler.Editor
             _httpServerPort = serializedObject.FindProperty("httpServerPort");
             _autoStartCapture = serializedObject.FindProperty("autoStartCapture");
             _autoStartSessionName = serializedObject.FindProperty("autoStartSessionName");
+            _enableDeepProfiling = serializedObject.FindProperty("enableDeepProfiling");
+            _captureLogs = serializedObject.FindProperty("captureLogs");
+            _deepProfilingSampleRate = serializedObject.FindProperty("deepProfilingSampleRate");
+            _enableResourceMemory = serializedObject.FindProperty("enableResourceMemory");
+            _resourceSampleInterval = serializedObject.FindProperty("resourceSampleInterval");
+            _enableGPUAnalysis = serializedObject.FindProperty("enableGPUAnalysis");
+            _customMarkerNames = serializedObject.FindProperty("customMarkerNames");
         }
 
         public override void OnInspectorGUI()
@@ -94,9 +105,23 @@ namespace GameAnalytics.Profiler.Editor
 
             // Estimated data size
             EditorGUILayout.HelpBox(
-                "Estimated data rate: ~200 bytes/frame × 60fps ≈ 12KB/s ≈ 3.5MB per 5 minutes\n" +
-                "(Excluding screenshots and overdraw heatmaps)",
+                "Estimated base data rate: ~235 bytes/frame × 60fps ≈ 14KB/s ≈ 4.0MB per 5 minutes\n" +
+                "Screenshots, overdraw heatmaps, logs and deep profiling samples are additional overhead.",
                 MessageType.Info);
+
+            if (!_enableDeepProfiling.boolValue)
+            {
+                EditorGUILayout.HelpBox(
+                    "Deep Profiling is disabled. Desktop module pages and call stack analysis will not have function sampling data.",
+                    MessageType.Warning);
+            }
+
+            if (GUILayout.Button("Apply Recommended Analysis Defaults"))
+            {
+                _enableDeepProfiling.boolValue = true;
+                _captureLogs.boolValue = true;
+                _deepProfilingSampleRate.intValue = 1;
+            }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("General", EditorStyles.boldLabel);
@@ -154,6 +179,32 @@ namespace GameAnalytics.Profiler.Editor
                 EditorGUILayout.PropertyField(_autoStartSessionName);
                 EditorGUI.indentLevel--;
             }
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Deep Profiling", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_enableDeepProfiling);
+            EditorGUI.indentLevel++;
+            using (new EditorGUI.DisabledScope(!_enableDeepProfiling.boolValue))
+            {
+                EditorGUILayout.PropertyField(_deepProfilingSampleRate);
+            }
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Logs", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_captureLogs);
+
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Advanced v3", EditorStyles.boldLabel);
+            EditorGUILayout.PropertyField(_enableResourceMemory);
+            if (_enableResourceMemory.boolValue)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(_resourceSampleInterval);
+                EditorGUI.indentLevel--;
+            }
+            EditorGUILayout.PropertyField(_enableGPUAnalysis);
+            EditorGUILayout.PropertyField(_customMarkerNames, true);
 
             serializedObject.ApplyModifiedProperties();
         }

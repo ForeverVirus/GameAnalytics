@@ -17,9 +17,9 @@ export default function AiStatusBar() {
     }
   }, [aiLiveLog, expanded]);
 
-  // Auto-collapse on start
+  // Auto-expand on start so CLI logs are immediately visible.
   useEffect(() => {
-    if (isRunning) setExpanded(false);
+    if (isRunning) setExpanded(true);
   }, [isRunning]);
 
   if (!isRunning && aiLiveLog.length === 0) return null;
