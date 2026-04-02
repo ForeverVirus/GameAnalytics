@@ -52,6 +52,7 @@ namespace GameAnalytics.Profiler
         // Deep profiling collectors
         private FunctionTimingCollector _functionTimingCollector;
         private LogCollector _logCollector;
+        private DeepProfileCollector _deepProfileCollector;
 
         // v3 collectors
         private ResourceMemoryCollector _resourceMemoryCollector;
@@ -71,6 +72,7 @@ namespace GameAnalytics.Profiler
 
         // Network
         private Network.EmbeddedHttpServer _httpServer;
+        private string _captureDirectory;
 
         private void Awake()
         {
@@ -82,6 +84,7 @@ namespace GameAnalytics.Profiler
 
             Instance = this;
             DontDestroyOnLoad(gameObject);
+            _captureDirectory = GetCaptureDirectory();
 
             if (config == null)
             {
@@ -102,6 +105,22 @@ namespace GameAnalytics.Profiler
                     StopCapture();
                 _httpServer?.Stop();
                 Instance = null;
+            }
+        }
+
+        private void OnDisable()
+        {
+            if (Instance == this)
+            {
+                _httpServer?.Stop();
+            }
+        }
+
+        private void OnApplicationQuit()
+        {
+            if (Instance == this)
+            {
+                _httpServer?.Stop();
             }
         }
 
@@ -130,6 +149,7 @@ namespace GameAnalytics.Profiler
 
             _functionTimingCollector = new FunctionTimingCollector();
             _logCollector = new LogCollector();
+            _deepProfileCollector = new DeepProfileCollector();
 
             // v3 collectors
             _resourceMemoryCollector = new ResourceMemoryCollector(
@@ -146,13 +166,26 @@ namespace GameAnalytics.Profiler
         {
             if (config.enableWifiTransfer)
             {
-                _httpServer = new Network.EmbeddedHttpServer(config.httpServerPort, this);
+                _httpServer = new Network.EmbeddedHttpServer(config.httpServerPort, this, _captureDirectory);
                 _httpServer.Start();
                 Debug.Log($"[GAProfiler] HTTP server started on port {config.httpServerPort}");
             }
         }
 
         // ==================== Public API ====================
+
+        private static string GetCaptureDirectory()
+        {
+            return System.IO.Path.Combine(Application.persistentDataPath, "GameAnalytics");
+        }
+
+        private static string BuildSessionFileBaseName(CaptureSession session)
+        {
+            string fileBase = $"{session.sessionName}_{session.deviceInfo.deviceModel}_{session.startTime:yyyyMMdd_HHmmss}";
+            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
+                fileBase = fileBase.Replace(c, '_');
+            return fileBase;
+        }
 
         /// <summary>Start capturing performance data.</summary>
         public void StartCapture(string sessionName = null)
@@ -175,6 +208,7 @@ namespace GameAnalytics.Profiler
             _captureStartTime = Time.realtimeSinceStartup;
             _framesSinceCapture = 0;
             _sampleEveryNFrames = Mathf.Max(1, config.sampleEveryNFrames);
+            _deepProfileCollector?.ClearLastCaptureMetadata();
 
             _session.deepProfilingEnabled = config.enableDeepProfiling;
             _session.targetFps = config.targetFps;
@@ -209,6 +243,18 @@ namespace GameAnalytics.Profiler
             else
             {
                 Debug.LogWarning("[GAProfiler] Deep profiling is disabled. Function-level analysis and call stack views in the desktop app will be empty for this capture.");
+            }
+
+            // Deep capture (binary log)
+            if (config.enableDeepCapture)
+            {
+                _deepProfileCollector.Initialize(_session);
+                _deepProfileCollector.OnCaptureStart(
+                    _captureDirectory,
+                    BuildSessionFileBaseName(_session),
+                    config.deepCaptureDurationLimit,
+                    config.autoDiscoverMarkers
+                );
             }
 
             // Log capture
@@ -259,6 +305,8 @@ namespace GameAnalytics.Profiler
 
             if (config.enableDeepProfiling)
                 _functionTimingCollector.OnCaptureStop();
+            if (config.enableDeepCapture)
+                _deepProfileCollector.OnCaptureStop();
             if (config.captureLogs)
                 _logCollector.OnCaptureStop();
 
@@ -287,6 +335,37 @@ namespace GameAnalytics.Profiler
         /// <summary>Get latest frame data for live monitoring.</summary>
         public FrameData? LatestFrame { get; private set; }
 
+        /// <summary>Enable or disable deep capture mode while idle.</summary>
+        public bool SetDeepCaptureEnabled(bool enabled)
+        {
+            if (State != CaptureState.Idle)
+                return false;
+
+            if (config == null)
+            {
+                config = ScriptableObject.CreateInstance<GAProfilerConfig>();
+            }
+
+            config.enableDeepCapture = enabled;
+            return config.enableDeepCapture == enabled;
+        }
+
+        /// <summary>Whether deep profile data (.data file) is available after last capture.</summary>
+        public bool HasDeepProfileData => _deepProfileCollector?.GetActualDataFilePath() != null;
+
+        /// <summary>Size of deep profile data file in bytes.</summary>
+        public long DeepProfileDataSize => _deepProfileCollector?.ProfilerDataSize ?? 0;
+
+        /// <summary>Path to the deep profile data file.</summary>
+        public string DeepProfileDataPath => _deepProfileCollector?.GetActualDataFilePath();
+
+        public string GetDeepProfileDataPathForSession(string sessionFileBaseName)
+        {
+            if (_deepProfileCollector == null || string.IsNullOrEmpty(sessionFileBaseName))
+                return null;
+            return _deepProfileCollector.GetActualDataFilePathForSession(sessionFileBaseName, _captureDirectory);
+        }
+
         // ==================== Update Loop ====================
 
         private void Update()
@@ -294,6 +373,9 @@ namespace GameAnalytics.Profiler
             if (State != CaptureState.Capturing) return;
 
             _framesSinceCapture++;
+
+            if (config.enableDeepCapture)
+                _deepProfileCollector.OnFrameUpdate();
 
             // Sample every N frames
             if (_framesSinceCapture % _sampleEveryNFrames != 0) return;
@@ -326,6 +408,14 @@ namespace GameAnalytics.Profiler
                     var customSamples = _customModuleCollector.CollectSamples();
                     if (customSamples.Count > 0)
                         samples.AddRange(customSamples);
+                }
+
+                // Merge dynamic marker samples from deep collector
+                if (config.enableDeepCapture && config.autoDiscoverMarkers)
+                {
+                    var dynamicSamples = _deepProfileCollector.CollectDynamicSamples();
+                    if (dynamicSamples.Count > 0)
+                        samples.AddRange(dynamicSamples);
                 }
 
                 _session.frameFunctionSamples.Add(samples);
@@ -380,15 +470,11 @@ namespace GameAnalytics.Profiler
 
         private IEnumerator ExportAndFinalize()
         {
-            string dir = System.IO.Path.Combine(
-                Application.persistentDataPath, "GameAnalytics");
+            string dir = _captureDirectory;
             if (!System.IO.Directory.Exists(dir))
                 System.IO.Directory.CreateDirectory(dir);
 
-            string fileName = $"{_session.sessionName}_{_session.deviceInfo.deviceModel}_{_session.startTime:yyyyMMdd_HHmmss}.gaprof";
-            // Sanitize file name
-            foreach (char c in System.IO.Path.GetInvalidFileNameChars())
-                fileName = fileName.Replace(c, '_');
+            string fileName = $"{BuildSessionFileBaseName(_session)}.gaprof";
 
             string filePath = System.IO.Path.Combine(dir, fileName);
 

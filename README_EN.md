@@ -2,83 +2,80 @@
 
 English | [中文](README.md)
 
-**Local-first game project analysis tool** for Unity and Godot projects — asset dependency analysis, code structure graphs, hardcode detection, and AI-assisted analysis.
+GameScriptAnalytics is a local-first analysis toolkit for Unity and Godot projects. It combines static project inspection, device-side performance capture, offline report analysis, deep function sampling, and AI-assisted diagnosis in one desktop workflow. The goal is not just to show metrics, but to connect project structure and runtime evidence so teams can locate bottlenecks faster.
 
----
+## Core Capabilities
 
-## Features
+### Static Project Analysis
+- Detects Unity and Godot projects automatically
+- Indexes assets, scripts, classes, methods, and project-scale metadata
+- Builds asset dependency graphs for upstream and downstream tracing
+- Builds code graphs at file, class, and method levels
+- Detects suspected dynamic references such as `Resources.Load` and Addressables usage
+- Detects hardcoded values such as paths, URLs, magic numbers, colors, and string literals
 
-### 📊 Project Overview
-- One-click selection of Unity / Godot project directories with automatic engine detection
-- Displays asset count, script count, class count, method count and other statistics after analysis
-- Analysis caching to avoid redundant scans
+### Runtime Performance Analysis
+- Connects to Unity Editor or physical devices for live capture
+- Generates `.gaprof` reports after capture stops
+- Supports importing, reopening, and managing report history per project
+- Includes screenshots, jank analysis, runtime logs, module timelines, and resource memory analysis
+- Supports deep sampled reports for CPU call trees, per-module function ranking, and jank frame function details
 
-### 🗺️ Asset Graph
-- Visualize asset dependencies (Prefab, Texture, Material, Shader, Scene, Audio, etc.)
-- D3.js force-directed / radial layout with zoom, pan, and highlights
-- Three-column workbench: file tree (left) + graph (center) + detail panel (right)
-- Ego-centric graph expanding 1-hop neighbors on node selection
-- Image thumbnail preview in the top-right corner when selecting image assets
-- Upstream / downstream dependency lists with click-to-navigate
+### AI-Assisted Analysis
+- Integrates local AI CLI tools including Claude CLI, Codex CLI, Gemini CLI, and Copilot CLI
+- Can analyze graph nodes, full performance reports, or individual modules
+- Includes a conversational performance assistant on top of report data
+- Streams AI logs and keeps analysis results available in the desktop UI
 
-### 🔗 Code Graph
-- Analyze code structure for C# (Unity) and GDScript / C# (Godot)
-- Three graph levels: file, class, and method
-- Visualize call relationships and inheritance hierarchies
-- AI single-node analysis and deep analysis support
+## Product Advantages
 
-### 🔍 Suspected References
-- Detect uncertain references from dynamic loading patterns (`Resources.Load`, Addressables, etc.)
-- Confirm (promote to official reference) or ignore individual items
-- Batch operations with status filtering (pending / confirmed / ignored)
+- Local-first workflow suitable for private projects and internal environments
+- Unified desktop experience for static graphs, device capture, offline reports, deep analysis, and AI diagnosis
+- Device-friendly workflow with both live capture and offline report investigation
+- Built for root-cause analysis, not only high-level scores: modules, frames, functions, and call trees are all traceable
+- Practical for iteration: report history, reopen flow, per-project reuse, and cached analysis are already integrated
 
-### ⚠️ Hardcode Detection
-- Automatically detect hardcoded values: paths, URLs, magic numbers, colors, string literals
-- Grouped by file with line numbers and severity levels
-- Click to locate source file
+## Feature Areas
 
-### 🤖 AI Analysis
-- Integrates local AI CLI tools (Claude CLI / Codex CLI / Gemini CLI / Copilot CLI, currently adapted for Windows)
-- Quick analysis (5-min timeout) and deep analysis (10-min timeout)
-- Batch analysis: send directories to AI in batches for project-level summaries
-- Results persisted per-node, auto-loaded on next session
+### Code and Asset Workspace
+- Overview
+- Asset Graph
+- Code Graph
+- Suspected References
+- Hardcode Detection
 
-### 🌐 Bilingual Support
-- Full Chinese / English UI switching
-- Exported reports support both languages
+### Performance Report Workspace
+- Performance Summary
+- Runtime Info
+- Module Timing Overview
+- CPU Call Stacks
+- Rendering / GPU Sync / Scripting / UI / Loading / Physics / Animation / Particles / GPU / Custom Modules
+- Jank Analysis
+- Memory Analysis
+- Battery and Temperature
+- Runtime Logs
+- Screenshot Viewer
+- Report History
+- AI Performance Assistant
 
-### 📤 Export
-- Export human-readable analysis reports
-- Export AI-readable knowledge packs to the project directory
+## Typical Use Cases
 
----
-
-## Screenshots
-
-*(Launch the app to explore each feature page)*
-
----
+- Performance optimization and regression validation
+- Offline investigation after reproducing issues on device
+- Asset dependency cleanup and redundancy review
+- Code structure inspection and risk discovery
+- Collaboration across client engineers, TA, technical artists, and performance engineers
 
 ## System Requirements
 
-- **OS**: Windows 10+ (currently the only officially supported platform)
-- **Node.js**: 18+
-- **Rust**: 1.77.2+ (with Cargo)
-- **AI Analysis (optional)**: At least one AI CLI tool installed
-  - [Claude CLI](https://docs.anthropic.com/en/docs/claude-cli)
-  - [Codex CLI](https://github.com/openai/codex)
-  - [Gemini CLI](https://github.com/google-gemini/gemini-cli)
-  - [GitHub Copilot CLI](https://docs.github.com/en/copilot)
+- Windows 10 or later
+- Node.js 18+
+- Rust 1.77.2+ with Cargo
+- Optional: at least one local AI CLI
 
-### Platform Notes
+The desktop build, debug, and packaging flow in this repository is currently validated on Windows.
 
-- The current release is only validated and officially supported on Windows.
-- The repository still contains a small amount of macOS / Linux-specific code paths (for example, file-manager branches and Tauri icon assets), but AI CLI launch, PATH inheritance, packaging, and regression testing have not been completed on those platforms.
-- Because of that, macOS and Linux should be treated as unsupported for now until platform validation is added back explicitly.
-
----
-
-## Installation & Build
+## Installation and Build
 
 ### 1. Clone the Repository
 
@@ -93,118 +90,92 @@ cd GameAnalytics/app
 npm install
 ```
 
-### 3. Development Mode
+### 3. Run in Development Mode
 
 ```bash
 npm run tauri dev
 ```
 
-This launches the desktop window with hot-reload at `http://localhost:5173`.
-
-### 4. Build Release
-
-```bash
-npm run tauri build
-```
-
-Build outputs:
-- **Windows**: `src-tauri/target/release/gamescript-analytics.exe`
-- **Installer**: `src-tauri/target/release/bundle/nsis/GameScriptAnalytics_*-setup.exe`
-- **MSI**: `src-tauri/target/release/bundle/msi/GameScriptAnalytics_*.msi`
-
-This README only documents Windows build outputs for now.
-
-### 5. Build Debug
+### 4. Build Debug
 
 ```bash
 npm run tauri build -- --debug
 ```
 
----
+Output:
 
-## Usage
+- `app/src-tauri/target/debug/gamescript-analytics.exe`
 
-1. Launch the app and click **Select Project** on the overview page
-2. Choose the root directory of a Unity or Godot project
-3. Click **Start Analysis** and wait for static analysis to complete
-4. Use the sidebar to navigate between analysis views:
-   - **Overview**: Project statistics
-   - **Asset Graph**: Browse asset dependencies
-   - **Code Graph**: Browse code call structures
-   - **Suspected Refs**: Review uncertain dynamic references
-   - **Hardcode**: Inspect hardcoded values
-   - **Settings**: Configure AI CLI and language options
+### 5. Build Release
 
-### AI Analysis Setup
+```bash
+npm run tauri build
+```
 
-1. Go to the **Settings** page
-2. Select an installed AI CLI tool
-3. Optionally configure model name and thinking level
-4. Return to a graph page, select a node, and click **AI Analyze** or **Deep Analyze**
+Output:
 
----
+- `app/src-tauri/target/release/gamescript-analytics.exe`
+- `app/src-tauri/target/release/bundle/nsis/GameScriptAnalytics_*-setup.exe`
+- `app/src-tauri/target/release/bundle/msi/GameScriptAnalytics_*.msi`
+
+## How to Use
+
+### Static Project Analysis
+
+1. Launch the desktop app
+2. Select a Unity or Godot project directory
+3. Start analysis
+4. Navigate through asset graphs, code graphs, suspected references, and hardcode results
+
+### Performance Report Analysis
+
+1. Open the same project in the desktop app
+2. Go to the performance analysis workspace
+3. Generate or open a report through one of these paths
+
+- Connect to Unity Editor or a physical device and capture live
+- Import an existing `.gaprof` report
+- Open a saved report from project history
+
+4. Review modules, call stacks, jank, memory, logs, and screenshots after the report finishes loading
+
+### AI Setup
+
+1. Configure an AI CLI in Settings
+2. Optionally set a model name and thinking level
+3. Trigger AI analysis from graph pages or report pages
+
+## Unity SDK
+
+The repository also includes the Unity-side capture SDK:
+
+- `unity-sdk/README.md`
+- `unity-sdk/README_EN.md`
+
+It is responsible for collecting runtime data in Unity Editor or on device and exporting reports for the desktop app.
 
 ## Tech Stack
 
 | Layer | Technology |
-|-------|------------|
-| Desktop Framework | [Tauri 2.0](https://v2.tauri.app/) |
-| Frontend | React 19 + TypeScript + Vite 8 |
+|------|------|
+| Desktop Framework | Tauri 2 |
+| Frontend | React 19 + TypeScript + Vite |
+| Backend | Rust |
 | State Management | Zustand |
-| Graph Visualization | D3.js (Canvas rendering) |
-| Backend | Rust (static analysis, filesystem, process management) |
-| Parallel Processing | Rayon (static analysis) + Tokio (async CLI calls) |
-| i18n | i18next |
-| Routing | React Router 7 |
+| Visualization | D3.js |
+| Internationalization | i18next |
+| Unity SDK | C# + Unity Runtime / Editor APIs |
 
----
+## Repository Layout
 
-## Project Structure
-
-```
+```text
 GameAnalytics/
-├── app/                          # Tauri app root
-│   ├── src/                      # Frontend source
-│   │   ├── api/tauri.ts          # Tauri command bindings
-│   │   ├── components/           # Shared components (GraphCanvas, FileTree, etc.)
-│   │   ├── pages/                # Page components
-│   │   │   ├── Overview.tsx      # Overview
-│   │   │   ├── AssetGraph.tsx    # Asset Graph
-│   │   │   ├── CodeGraph.tsx     # Code Graph
-│   │   │   ├── SuspectedRefs.tsx # Suspected References
-│   │   │   ├── Hardcode.tsx      # Hardcode Detection
-│   │   │   └── Settings.tsx      # Settings
-│   │   ├── store/                # Zustand state management
-│   │   └── i18n/                 # i18n configuration
-│   ├── src-tauri/                # Rust backend
-│   │   ├── src/
-│   │   │   ├── commands.rs       # Tauri commands (21 total)
-│   │   │   ├── analysis.rs       # Static analysis engine
-│   │   │   └── graph/            # Graph data model & store
-│   │   ├── Cargo.toml
-│   │   └── tauri.conf.json
-│   └── package.json
+├── app/                 # Desktop app (Tauri + React + Rust)
+├── unity-sdk/           # Unity runtime capture SDK
+├── README.md
+└── README_EN.md
 ```
-
----
-
-## Supported Engines
-
-| Engine | Languages | Status |
-|--------|-----------|--------|
-| Unity | C# | ✅ Full support |
-| Godot | GDScript, C# | ✅ Full support |
-
-> Shader files are only analyzed as part of asset references (e.g., Material → Shader). Internal shader semantics are not parsed.
-
----
 
 ## License
 
-MIT License
-
----
-
-## Acknowledgements
-
-Built with [Tauri](https://tauri.app/). Thanks to the open-source community for their contributions.
+MIT

@@ -13,6 +13,17 @@ namespace GameAnalytics.Profiler.Collectors
 {
     public class FunctionTimingCollector
     {
+        public static bool IsStaticMarker(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            for (int i = 0; i < KnownMarkers.Length; i++)
+            {
+                if (string.Equals(KnownMarkers[i].name, name, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
+        }
+
         private struct MarkerEntry
         {
             public string name;

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../api/tauri';
-import type { DeviceProfileReport, DeviceStatus, DiscoveredDevice, RemoteSession, TimelinePoint, FunctionAnalysis, FunctionStats, LogAnalysis, PerFrameFunctions, DeviceAiAnalysis } from '../api/tauri';
+import type { DeviceProfileReport, DeviceStatus, DiscoveredDevice, RemoteSession, TimelinePoint, FunctionAnalysis, FunctionStats, LogAnalysis, PerFrameFunctions, DeviceAiAnalysis, ReportMeta } from '../api/tauri';
 import { useAppStore } from '../store';
-import AiChatPanel from '../components/device/AiChatPanel';
+import AiChatPanel, { type ChatMessage as DeviceAiChatMessage } from '../components/device/AiChatPanel';
 import ReportOverview from '../components/device/pages/ReportOverview';
 import ReportRuntimeInfo from '../components/device/pages/ReportRuntimeInfo';
 import ReportModuleOverview from '../components/device/pages/ReportModuleOverview';
@@ -25,6 +25,21 @@ import ReportLogs from '../components/device/pages/ReportLogs';
 import ReportCustomModules from '../components/device/pages/ReportCustomModules';
 import ReportScreenshots from '../components/device/pages/ReportScreenshots';
 import ReportHistory from '../components/device/pages/ReportHistory';
+import { formatBeijingDateTime } from '../utils/time';
+import {
+  getCachedCallTree,
+  getCachedFrameFunctions,
+  getCachedModuleAnalysis,
+  getCachedReportHistory,
+  getCachedResourceMemoryAnalysis,
+  getCachedScreenshot,
+  setCachedCallTree,
+  setCachedFrameFunctions,
+  setCachedModuleAnalysis,
+  setCachedReportHistory,
+  setCachedResourceMemoryAnalysis,
+  setCachedScreenshot,
+} from '../utils/deviceReportCache';
 
 type TabKey = 'device' | 'report';
 type ReportPage = 'overview' | 'runtime_info' | 'module_overview' | 'call_stacks'
@@ -112,6 +127,14 @@ type LiveDeviceFrame = {
   gpuTimeMs: number;
   totalAllocated: number;
   drawCalls: number;
+};
+
+type ReportPreloadState = {
+  active: boolean;
+  total: number;
+  completed: number;
+  current: string;
+  errors: string[];
 };
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
@@ -514,6 +537,7 @@ function AiDeviceSection({ filePath, report }: { filePath: string; report: Devic
 
 export default function DeviceProfile() {
   const { t } = useTranslation();
+  const projectPath = useAppStore(s => s.project?.path);
   const [tab, setTab] = useState<TabKey>('device');
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [selected, setSelected] = useState<DiscoveredDevice | null>(null);
@@ -525,10 +549,18 @@ export default function DeviceProfile() {
   const [manualIp, setManualIp] = useState('');
   const [manualPort, setManualPort] = useState('9527');
   const [sessionName, setSessionName] = useState('');
+  const [deepCaptureEnabled, setDeepCaptureEnabled] = useState(false);
+  const [deepToggleBusy, setDeepToggleBusy] = useState(false);
+  const [deepToggleLogs, setDeepToggleLogs] = useState<string[]>([]);
+  const [deepCaptureLogs, setDeepCaptureLogs] = useState<string[]>([]);
+  const [reportOpenLogs, setReportOpenLogs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
+  const [preloadState, setPreloadState] = useState<ReportPreloadState>({ active: false, total: 0, completed: 0, current: '', errors: [] });
   const [reportPage, setReportPage] = useState<ReportPage>('overview');
   const [showAiPanel, setShowAiPanel] = useState(false);
+  const [aiChatMessagesByFile, setAiChatMessagesByFile] = useState<Record<string, DeviceAiChatMessage[]>>({});
   const [downloading, setDownloading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -536,15 +568,167 @@ export default function DeviceProfile() {
   const [screenshotData, setScreenshotData] = useState<string | null>(null);
   const previousCapturingRef = useRef(false);
   const suppressAutoOpenRef = useRef(false);
+  const deepToggleBusyRef = useRef(false);
+  const preloadRunIdRef = useRef(0);
+  const preloadCancelRef = useRef(false);
 
   const currentStatus = deviceStatus ?? selected?.status ?? null;
   const isCapturing = currentStatus?.capturing ?? false;
+  const aiChatMessages = aiChatMessagesByFile[filePath] ?? [];
 
-  const refreshStatus = useCallback(async (silent = true) => {
+  const appendDeepToggleLog = useCallback((line: string) => {
+    const ts = new Date().toLocaleTimeString();
+    setDeepToggleLogs(prev => [...prev.slice(-7), `[${ts}] ${line}`]);
+  }, []);
+
+  const appendDeepCaptureLog = useCallback((line: string) => {
+    const ts = new Date().toLocaleTimeString();
+    setDeepCaptureLogs(prev => [...prev.slice(-19), `[${ts}] ${line}`]);
+  }, []);
+
+  const appendReportOpenLog = useCallback(async (line: string) => {
+    const ts = new Date().toLocaleTimeString();
+    const formatted = `[${ts}] ${line}`;
+    setReportOpenLogs(prev => [...prev.slice(-11), formatted]);
+    try {
+      await api.appendDeviceDebugLog('REPORT_OPEN', line);
+    } catch {
+      // ignore debug log write failure
+    }
+  }, []);
+
+  const runReportPreload = useCallback(async (targetFilePath: string, targetReport: DeviceProfileReport) => {
+    if (!targetFilePath) return;
+
+    const moduleNames = ['rendering', 'gpu_sync', 'scripting', 'ui', 'loading', 'physics', 'animation', 'particles', 'gpu', 'custom'];
+    const jankPoints = targetReport.jank_analysis.jank_timeline.filter(point => point.value > 33);
+    const defaultJankPoint = jankPoints.find(point => point.frame_index === targetReport.jank_analysis.worst_frame_index) ?? jankPoints[0] ?? null;
+    const defaultJankFrameIndex = defaultJankPoint?.frame_index;
+    const initialScreenshotFrame = targetReport.screenshot_frame_indices[0];
+    const tasks = [
+      {
+        key: 'calltree-forward',
+        label: 'CPU调用堆栈（正向）',
+        shouldSkip: () => !!getCachedCallTree(targetFilePath, 'forward'),
+        run: () => api.getCallTree(targetFilePath, undefined, undefined, undefined, 'forward')
+          .then(data => setCachedCallTree(targetFilePath, 'forward', data)),
+      },
+      {
+        key: 'calltree-reverse',
+        label: 'CPU调用堆栈（反向）',
+        shouldSkip: () => !!getCachedCallTree(targetFilePath, 'reverse'),
+        run: () => api.getCallTree(targetFilePath, undefined, undefined, undefined, 'reverse')
+          .then(data => setCachedCallTree(targetFilePath, 'reverse', data)),
+      },
+      {
+        key: 'resource-memory',
+        label: '资源内存分析',
+        shouldSkip: () => !!getCachedResourceMemoryAnalysis(targetFilePath),
+        run: () => api.getResourceMemoryAnalysis(targetFilePath)
+          .then(data => setCachedResourceMemoryAnalysis(targetFilePath, data)),
+      },
+      {
+        key: 'jank-frame-functions',
+        label: '卡顿帧函数详情',
+        shouldSkip: () =>
+          defaultJankFrameIndex === undefined
+          || !!getCachedFrameFunctions(targetFilePath, defaultJankFrameIndex, undefined, true),
+        run: () => api.getFrameFunctions(targetFilePath, defaultJankFrameIndex!, undefined, true)
+          .then(data => {
+            if (data) {
+              setCachedFrameFunctions(targetFilePath, defaultJankFrameIndex!, data, undefined, true);
+            }
+          }),
+      },
+      {
+        key: 'screenshots-initial',
+        label: '截图页首帧',
+        shouldSkip: () =>
+          initialScreenshotFrame === undefined
+          || !!getCachedScreenshot(targetFilePath, initialScreenshotFrame),
+        run: () => api.getDeviceScreenshot(targetFilePath, initialScreenshotFrame!)
+          .then(data => setCachedScreenshot(targetFilePath, initialScreenshotFrame!, data)),
+      },
+      {
+        key: 'report-history',
+        label: '历史报告列表',
+        shouldSkip: () => !!getCachedReportHistory(projectPath),
+        run: () => api.listDeviceReports()
+          .then(data => setCachedReportHistory(projectPath, data)),
+      },
+      ...moduleNames.map(moduleName => ({
+        key: `module-${moduleName}`,
+        label: `模块分析：${moduleName}`,
+        shouldSkip: () => !!getCachedModuleAnalysis(targetFilePath, moduleName),
+        run: () => api.getModuleAnalysis(targetFilePath, moduleName)
+          .then(data => setCachedModuleAnalysis(targetFilePath, moduleName, data)),
+      })),
+    ];
+
+    const pendingTasks = tasks.filter(task => !task.shouldSkip());
+    if (pendingTasks.length === 0) {
+      setPreloadState({ active: false, total: 0, completed: 0, current: '', errors: [] });
+      return;
+    }
+
+    const runId = Date.now();
+    preloadRunIdRef.current = runId;
+    preloadCancelRef.current = false;
+    setPreloadState({
+      active: true,
+      total: pendingTasks.length,
+      completed: 0,
+      current: pendingTasks[0].label,
+      errors: [],
+    });
+
+    let completed = 0;
+    for (let index = 0; index < pendingTasks.length; index++) {
+      const task = pendingTasks[index];
+      if (preloadRunIdRef.current !== runId || preloadCancelRef.current) {
+        break;
+      }
+
+      setPreloadState(prev => ({ ...prev, current: task.label }));
+      try {
+        await task.run();
+      } catch (err) {
+        setPreloadState(prev => {
+          if (preloadRunIdRef.current !== runId) return prev;
+          return { ...prev, errors: [...prev.errors, `${task.label}: ${String(err)}`] };
+        });
+      }
+
+      completed += 1;
+      setPreloadState(prev => {
+        if (preloadRunIdRef.current !== runId) return prev;
+        return {
+          ...prev,
+          completed,
+          current: pendingTasks[index + 1]?.label ?? (preloadCancelRef.current ? '正在取消剩余预加载任务...' : '收尾中...'),
+        };
+      });
+    }
+
+    setPreloadState(prev => {
+      if (preloadRunIdRef.current !== runId) return prev;
+      return { ...prev, active: false, current: preloadCancelRef.current ? '已取消剩余预加载任务' : '预加载完成' };
+    });
+  }, [projectPath]);
+
+  const cancelReportLoad = useCallback(() => {
+    preloadCancelRef.current = true;
+    setPreloadState(prev => ({ ...prev, current: '正在取消剩余预加载任务...' }));
+  }, []);
+
+  const refreshStatus = useCallback(async (silent = true, forceDeepCaptureSync = false) => {
     if (!selected) return null;
     try {
       const status = await api.getDeviceStatus(selected.ip, selected.port);
       setDeviceStatus(status);
+      if ((forceDeepCaptureSync || !deepToggleBusyRef.current) && status.deepCaptureEnabled !== undefined) {
+        setDeepCaptureEnabled(status.deepCaptureEnabled);
+      }
       setDevices(prev => prev.map(device => device.ip === selected.ip && device.port === selected.port ? { ...device, status } : device));
       return status;
     } catch (e) {
@@ -568,11 +752,17 @@ export default function DeviceProfile() {
 
   const openDownloadedReport = useCallback(async (downloadedPath: string) => {
     setLoading(true);
+    setLoadingMessage('正在解析基础报告...');
     setError(null);
     try {
-      setFilePath(downloadedPath);
+      await appendReportOpenLog(`openDownloadedReport start -> ${downloadedPath}`);
       const generated = await api.generateDeviceReport(downloadedPath);
+      await appendReportOpenLog(`openDownloadedReport loaded -> session=${generated.session_name}, frames=${generated.total_frames}`);
+      setLoadingMessage('正在预加载分页数据...');
+      await runReportPreload(downloadedPath, generated);
+      setFilePath(downloadedPath);
       setReport(generated);
+      setReportPage('overview');
       try {
         await api.saveDeviceReport(downloadedPath);
       } catch {
@@ -581,27 +771,61 @@ export default function DeviceProfile() {
       setTab('report');
       setMessage(`${t('device.autoOpenedReport', '已自动打开报告: ')}${downloadedPath.split(/[\\/]/).pop()}`);
     } catch (e) {
+      await appendReportOpenLog(`openDownloadedReport failed <- ${String(e)}`);
       setError(String(e));
     } finally {
+      setLoadingMessage(null);
       setLoading(false);
     }
-  }, [t]);
+  }, [appendReportOpenLog, runReportPreload, t]);
 
-  const openSavedReport = useCallback(async (reportId: string) => {
+  const openSavedReport = useCallback(async (reportMeta: ReportMeta) => {
     setLoading(true);
+    setLoadingMessage('正在加载历史报告...');
     setError(null);
     try {
-      const saved = await api.getSavedDeviceReport(reportId);
-      setReport(saved);
-      setFilePath(saved.source_file_path || '');
-      setTab('report');
-      setMessage(`${t('device.autoOpenedReport', '已打开历史报告: ')}${saved.session_name}`);
+      await appendReportOpenLog(`openSavedReport start -> reportId=${reportMeta.id}`);
+      if (reportMeta.source_file) {
+        await appendReportOpenLog(`openSavedReport prefer source_file -> ${reportMeta.source_file}`);
+        await openDownloadedReport(reportMeta.source_file);
+      } else {
+        const saved = await api.getSavedDeviceReport(reportMeta.id);
+        await appendReportOpenLog(`openSavedReport loaded snapshot -> session=${saved.session_name}, source=${saved.source_file_path || '<none>'}`);
+        setReport(saved);
+        setFilePath(saved.source_file_path || '');
+        setReportPage('overview');
+        setTab('report');
+        setMessage(`${t('device.autoOpenedReport', '已打开历史报告: ')}${saved.session_name}`);
+      }
     } catch (e) {
+      await appendReportOpenLog(`openSavedReport failed <- ${String(e)}`);
       setError(String(e));
     } finally {
+      setLoadingMessage(null);
       setLoading(false);
     }
-  }, [t]);
+  }, [appendReportOpenLog, openDownloadedReport, t]);
+
+  const openMergedReport = useCallback(async (downloadedPath: string, mergedReport: DeviceProfileReport) => {
+    setLoading(true);
+    setLoadingMessage('正在预加载分页数据...');
+    try {
+      await runReportPreload(downloadedPath, mergedReport);
+      setFilePath(downloadedPath);
+      setReport(mergedReport);
+      setReportPage('overview');
+      setTab('report');
+      try {
+        await api.saveDeviceReport(downloadedPath);
+      } catch {
+        // History is project-scoped; ignore when no project is loaded.
+      }
+      setMessage(`${t('device.deepMerged', '深度数据已合并加载')}: ${downloadedPath.split(/[\\/]/).pop()}`);
+    } finally {
+      setLoadingMessage(null);
+      setLoading(false);
+    }
+  }, [runReportPreload, t]);
 
   useEffect(() => {
     if (!selected) {
@@ -706,26 +930,88 @@ export default function DeviceProfile() {
     }
   };
 
+  const handleToggleDeepCapture = async () => {
+    if (!selected) return;
+    const newValue = !deepCaptureEnabled;
+    setDeepToggleBusy(true);
+    deepToggleBusyRef.current = true;
+    appendDeepToggleLog(`toggle start -> requested=${newValue}`);
+    setDeepCaptureEnabled(newValue);
+    try {
+      const applied = await api.remoteToggleDeepProfiling(selected.ip, selected.port, newValue);
+      appendDeepToggleLog(`toggle response <- applied=${applied}`);
+      const status = await refreshStatus(false, true);
+      appendDeepToggleLog(`status refresh <- deepCaptureEnabled=${status?.deepCaptureEnabled ?? 'undefined'}`);
+      if (status?.deepCaptureEnabled !== undefined) {
+        setDeepCaptureEnabled(status.deepCaptureEnabled);
+      } else {
+        setDeepCaptureEnabled(applied);
+      }
+    } catch (e) {
+      setDeepCaptureEnabled(!newValue);
+      appendDeepToggleLog(`toggle failed <- ${String(e)}`);
+      setError(String(e));
+    } finally {
+      deepToggleBusyRef.current = false;
+      setDeepToggleBusy(false);
+    }
+  };
+
   const handleStopCapture = async () => {
     if (!selected) return;
     setBusy(true);
     setError(null);
     setMessage(null);
+    setDeepCaptureLogs([]);
     suppressAutoOpenRef.current = true;
     try {
+      appendDeepCaptureLog(`stop start -> device=${selected.ip}:${selected.port}`);
       const stopResult = await api.remoteStopCapture(selected.ip, selected.port);
+      appendDeepCaptureLog(`stop response <- filePath=${stopResult.filePath || '<empty>'}, sessionName=${stopResult.sessionName || '<empty>'}, isDeepProfile=${String(stopResult.isDeepProfile)}, deepDataSize=${String(stopResult.deepDataSize)}`);
       setDeviceStatus(prev => prev ? { ...prev, capturing: false } : prev);
       const sessionsAfterStop = await refreshSessions(true);
       const stopFileName = stopResult.filePath.split(/[\\/]/).pop() || '';
       const fallbackFile = sessionsAfterStop.slice().sort((a, b) => b.created.localeCompare(a.created))[0]?.fileName || '';
       const targetFile = stopFileName || fallbackFile;
+      appendDeepCaptureLog(`target report <- stopFile=${stopFileName || '<empty>'}, fallbackFile=${fallbackFile || '<empty>'}, chosen=${targetFile || '<empty>'}`);
       if (!targetFile) {
+        appendDeepCaptureLog('stop abort <- no report file found after capture');
         setMessage(t('device.reportPending', '采集已结束，但还未找到报告文件，请稍后刷新会话列表。'));
         return;
       }
       const downloadedPath = await api.downloadDeviceSession(selected.ip, selected.port, targetFile);
-      await openDownloadedReport(downloadedPath);
+      appendDeepCaptureLog(`gaprof download ok <- ${downloadedPath}`);
+
+      // If deep capture data exists, download and merge
+      if (stopResult.isDeepProfile && stopResult.deepDataSize && stopResult.deepDataSize > 0) {
+        try {
+          setMessage(t('device.downloadingDeep', '正在下载深度采集数据...'));
+          const sessionName = targetFile.replace(/\.gaprof$/, '');
+          appendDeepCaptureLog(`deep branch -> sessionBase=${sessionName}`);
+          const deepPath = await api.remoteDownloadDeepProfile(selected.ip, selected.port, sessionName);
+          try {
+            const info = await import('@tauri-apps/plugin-fs');
+            const stat = await info.stat(deepPath);
+            appendDeepCaptureLog(`deep download ok <- ${deepPath} (${stat.size ?? 'unknown'} bytes)`);
+          } catch {
+            appendDeepCaptureLog(`deep download ok <- ${deepPath}`);
+          }
+          // Load merged report
+          const mergedReport = await api.loadDeepProfile(downloadedPath, deepPath);
+          appendDeepCaptureLog(`deep merge ok <- session=${mergedReport.session_name}`);
+          await openMergedReport(downloadedPath, mergedReport);
+        } catch (deepErr) {
+          // Deep data download failed, fall back to normal report
+          appendDeepCaptureLog(`deep branch failed <- ${String(deepErr)}`);
+          setMessage(t('device.deepFailed', '深度数据加载失败，已使用标准报告'));
+          await openDownloadedReport(downloadedPath);
+        }
+      } else {
+        appendDeepCaptureLog('standard branch -> no deep data advertised by device');
+        await openDownloadedReport(downloadedPath);
+      }
     } catch (e) {
+      appendDeepCaptureLog(`stop failed <- ${String(e)}`);
       setError(String(e));
     } finally {
       window.setTimeout(() => {
@@ -835,6 +1121,39 @@ export default function DeviceProfile() {
 
       {error && <div className="ai-error" style={{ marginBottom: 16 }}>{error}</div>}
       {message && <div className="export-toast" style={{ marginBottom: 16 }}>{message}</div>}
+      {loading && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(4,10,18,0.72)', zIndex: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div className="card" style={{ width: 520, maxWidth: 'calc(100vw - 48px)', padding: 20 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#e0e0e0', marginBottom: 12 }}>正在加载报告</div>
+            <div style={{ color: '#888', fontSize: 12, marginBottom: 10 }}>
+              {preloadState.active ? preloadState.current || '预加载中...' : loadingMessage || '加载中...'}
+            </div>
+            <div style={{ height: 10, background: '#1a1a2e', borderRadius: 999, overflow: 'hidden', marginBottom: 8 }}>
+              <div
+                style={{
+                  width: `${preloadState.total > 0 ? (preloadState.completed / preloadState.total) * 100 : 0}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, #00e0ff, #7c4dff)',
+                }}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#80d8ff', fontSize: 12, marginBottom: 12 }}>
+              <span>{preloadState.completed}/{preloadState.total || 1}</span>
+              <span>{preloadState.active ? '正在后台准备分页数据' : '正在解析基础报告'}</span>
+            </div>
+            {preloadState.errors.length > 0 && (
+              <div style={{ marginBottom: 12, color: '#ffb3b3', fontSize: 11, whiteSpace: 'pre-wrap', maxHeight: 120, overflowY: 'auto' }}>
+                {preloadState.errors.join('\n')}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn-secondary" onClick={cancelReportLoad}>
+                {preloadState.active ? '取消加载' : '关闭'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {tab === 'device' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -895,10 +1214,52 @@ export default function DeviceProfile() {
                 <button className="btn-secondary" onClick={() => void refreshSessions()} disabled={busy}>
                   ↻ {t('device.refreshSessions', '刷新会话')}
                 </button>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 12, color: deepCaptureEnabled ? '#ff9800' : '#888', cursor: isCapturing ? 'not-allowed' : 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={deepCaptureEnabled}
+                    onChange={handleToggleDeepCapture}
+                    disabled={isCapturing || busy || deepToggleBusy}
+                  />
+                  🔬 {t('device.deepCapture', '深度采集（与设备端同步）')}
+                </label>
               </div>
 
+              {deepToggleLogs.length > 0 && (
+                <div style={{ marginTop: 8, padding: '8px 10px', border: '1px solid #5d2a2a', background: '#2a1111', borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: '#ff8a80', marginBottom: 4 }}>深度采集调试日志</div>
+                  {deepToggleLogs.map((line, index) => (
+                    <div key={index} style={{ fontSize: 11, color: '#ffb3b3', fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {deepCaptureLogs.length > 0 && (
+                <div style={{ marginTop: 8, padding: '8px 10px', border: '1px solid #5d2a2a', background: '#2a1111', borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: '#ff8a80', marginBottom: 4 }}>深度报告调试日志</div>
+                  {deepCaptureLogs.map((line, index) => (
+                    <div key={index} style={{ fontSize: 11, color: '#ffb3b3', fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {reportOpenLogs.length > 0 && (
+                <div style={{ marginTop: 8, padding: '8px 10px', border: '1px solid #2a4f5d', background: '#0f1b24', borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: '#80d8ff', marginBottom: 4 }}>报告打开调试日志</div>
+                  {reportOpenLogs.map((line, index) => (
+                    <div key={index} style={{ fontSize: 11, color: '#b3e5fc', fontFamily: 'monospace', whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {sessions.length > 0 && (
-                <div>
+                <div style={{ maxHeight: 260, overflowY: 'auto', borderTop: '1px solid #222', paddingTop: 8 }}>
                   <h4 style={{ color: '#aaa', margin: '0 0 8px' }}>{t('device.sessions', '设备上的会话')}</h4>
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <thead>
@@ -914,7 +1275,7 @@ export default function DeviceProfile() {
                         <tr key={session.fileName} style={{ borderTop: '1px solid #222' }}>
                           <td style={{ padding: '6px 8px', fontFamily: 'monospace', fontSize: 12 }}>{session.fileName}</td>
                           <td style={{ padding: '6px 8px', textAlign: 'right', color: '#aaa', fontSize: 12 }}>{(session.sizeBytes / 1024 / 1024).toFixed(1)} MB</td>
-                          <td style={{ padding: '6px 8px', textAlign: 'right', color: '#888', fontSize: 12 }}>{session.created}</td>
+                          <td style={{ padding: '6px 8px', textAlign: 'right', color: '#888', fontSize: 12 }}>{formatBeijingDateTime(session.created)}</td>
                           <td style={{ padding: '6px 8px', textAlign: 'center' }}>
                             <button className="btn-secondary" onClick={() => void handleDownload(session.fileName)} disabled={downloading === session.fileName} style={{ fontSize: 11, padding: '2px 12px' }}>
                               {downloading === session.fileName ? '...' : `⬇ ${t('device.download', '下载')}`}
@@ -943,14 +1304,19 @@ export default function DeviceProfile() {
       {tab === 'report' && (
         <div>
           {!report ? (
-            <div className="card" style={{ padding: 40, textAlign: 'center' }}>
-              <h3 style={{ color: '#aaa', margin: '0 0 16px' }}>📂 {t('device.importTitle', '导入性能数据')}</h3>
-              <p style={{ color: '#666', marginBottom: 20 }}>
-                {t('device.importDesc', '从设备下载或手动导入 .gaprof 文件，获取完整的性能分析报告')}
-              </p>
-              <button className="btn-primary" onClick={handleImport} style={{ fontSize: 16, padding: '12px 32px' }}>
-                📁 {t('device.selectFile', '选择文件')}
-              </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="card" style={{ padding: 40, textAlign: 'center' }}>
+                <h3 style={{ color: '#aaa', margin: '0 0 16px' }}>📂 {t('device.importTitle', '导入性能数据')}</h3>
+                <p style={{ color: '#666', marginBottom: 20 }}>
+                  {t('device.importDesc', '从设备下载或手动导入 .gaprof 文件，获取完整的性能分析报告')}
+                </p>
+                <button className="btn-primary" onClick={handleImport} style={{ fontSize: 16, padding: '12px 32px' }}>
+                  📁 {t('device.selectFile', '选择文件')}
+                </button>
+              </div>
+              <div className="card" style={{ padding: 16 }}>
+                <ReportHistory onLoadReport={(reportMeta) => { void openSavedReport(reportMeta); }} />
+              </div>
             </div>
           ) : (
             <div style={{ display: 'flex', gap: 0, height: 'calc(100vh - 160px)' }}>
@@ -1021,13 +1387,20 @@ export default function DeviceProfile() {
                 {reportPage === 'logs' && <ReportLogs report={report} />}
                 {reportPage === 'custom_modules' && <ReportCustomModules filePath={filePath} />}
                 {reportPage === 'screenshots' && <ReportScreenshots filePath={filePath} report={report} />}
-                {reportPage === 'history' && <ReportHistory onLoadReport={(reportId) => { void openSavedReport(reportId); }} />}
+                {reportPage === 'history' && <ReportHistory onLoadReport={(reportMeta) => { void openSavedReport(reportMeta); }} />}
               </div>
 
               {/* AI Chat Panel */}
               {showAiPanel && (
-                <div style={{ width: 360, borderLeft: '1px solid #222', flexShrink: 0 }}>
-                  <AiChatPanel filePath={filePath} context={`Report grade: ${report.overall_grade}, Avg FPS: ${report.summary.avg_fps.toFixed(1)}, Peak Mem: ${report.summary.peak_memory_mb.toFixed(0)}MB, Jank: ${report.summary.jank_count}`} />
+                <div style={{ position: 'fixed', right: 24, top: 88, width: 380, height: 'calc(100vh - 120px)', zIndex: 40, boxShadow: '0 18px 48px rgba(0,0,0,0.45)', border: '1px solid #222', borderRadius: 10, overflow: 'hidden', background: '#1a1a2e' }}>
+                  <AiChatPanel
+                    filePath={filePath}
+                    context={`Report grade: ${report.overall_grade}, Avg FPS: ${report.summary.avg_fps.toFixed(1)}, Peak Mem: ${report.summary.peak_memory_mb.toFixed(0)}MB, Jank: ${report.summary.jank_count}`}
+                    messages={aiChatMessages}
+                    onMessagesChange={(messages) => {
+                      setAiChatMessagesByFile(prev => ({ ...prev, [filePath]: messages }));
+                    }}
+                  />
                 </div>
               )}
             </div>

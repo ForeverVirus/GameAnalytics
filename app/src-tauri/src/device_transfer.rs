@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 const DEFAULT_PORT: u16 = 9527;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
@@ -27,6 +28,12 @@ pub struct DeviceStatus {
     pub elapsed: f32,
     #[serde(rename = "currentFps")]
     pub current_fps: f32,
+    #[serde(rename = "deepCaptureEnabled")]
+    pub deep_capture_enabled: bool,
+    #[serde(rename = "hasDeepData")]
+    pub has_deep_data: bool,
+    #[serde(rename = "deepDataSize")]
+    pub deep_data_size: i64,
 }
 
 impl Default for DeviceStatus {
@@ -39,6 +46,9 @@ impl Default for DeviceStatus {
             frame_count: 0,
             elapsed: 0.0,
             current_fps: 0.0,
+            deep_capture_enabled: false,
+            has_deep_data: false,
+            deep_data_size: 0,
         }
     }
 }
@@ -83,6 +93,10 @@ pub struct RemoteStopCaptureResult {
     pub duration: f32,
     #[serde(rename = "screenshotCount")]
     pub screenshot_count: i32,
+    #[serde(rename = "isDeepProfile")]
+    pub is_deep_profile: bool,
+    #[serde(rename = "deepDataSize")]
+    pub deep_data_size: i64,
 }
 
 /// Scan the local network subnet for devices running the GAProfiler HTTP server.
@@ -257,6 +271,9 @@ fn parse_device_status(body: &str) -> Result<DeviceStatus, String> {
         frame_count: value.get("frameCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         elapsed: value.get("elapsed").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         current_fps: value.get("currentFps").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+        deep_capture_enabled: value.get("deepCaptureEnabled").and_then(|v| v.as_bool()).unwrap_or(false),
+        has_deep_data: value.get("hasDeepData").and_then(|v| v.as_bool()).unwrap_or(false),
+        deep_data_size: value.get("deepDataSize").and_then(|v| v.as_i64()).unwrap_or(0),
     })
 }
 
@@ -315,5 +332,66 @@ fn parse_stop_capture_result(body: &str) -> Result<RemoteStopCaptureResult, Stri
         frame_count: value.get("frameCount").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
         duration: value.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         screenshot_count: value.get("screenshotCount").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+        is_deep_profile: value.get("isDeepProfile").and_then(|v| v.as_bool()).unwrap_or(false),
+        deep_data_size: value.get("deepDataSize").and_then(|v| v.as_i64()).unwrap_or(0),
     })
+}
+
+/// Toggle deep profiling mode on the device (must be called when not capturing).
+pub async fn remote_toggle_deep_profiling(ip: &str, port: u16, enabled: bool) -> Result<bool, String> {
+    let client = Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = format!("http://{}:{}/deep-profiling/toggle", ip, port);
+    let body = serde_json::json!({"enabled": enabled});
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Toggle deep profiling failed: {}", text));
+    }
+
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(value.get("deepCapture").and_then(|v| v.as_bool()).unwrap_or(enabled))
+}
+
+/// Download deep profile .data file from the device (streaming for large files).
+pub async fn download_deep_profile(
+    ip: &str,
+    port: u16,
+    session_name: &str,
+    save_dir: &str,
+) -> Result<String, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(600)) // Large file timeout (10 min)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let encoded_name = urlencoding::encode(session_name);
+    let url = format!("http://{}:{}/sessions/{}/deep-download", ip, port, encoded_name);
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Deep profile download failed: {}", text));
+    }
+
+    std::fs::create_dir_all(save_dir).map_err(|e| e.to_string())?;
+
+    let file_name = format!("{}.deep.data", session_name);
+    let save_path = Path::new(save_dir).join(&file_name);
+
+    let mut file = tokio::fs::File::create(&save_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut response = resp;
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+
+    Ok(save_path.to_string_lossy().to_string())
 }

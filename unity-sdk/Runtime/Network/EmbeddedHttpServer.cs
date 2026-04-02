@@ -10,6 +10,7 @@ using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using UnityEngine;
@@ -30,11 +31,11 @@ namespace GameAnalytics.Profiler.Network
         public bool IsRunning => _running;
         public int Port => _port;
 
-        public EmbeddedHttpServer(int port, GAProfiler profiler)
+        public EmbeddedHttpServer(int port, GAProfiler profiler, string sessionsDirectory)
         {
             _port = port;
             _profiler = profiler;
-            _sessionsDirectory = Path.Combine(Application.persistentDataPath, "GameAnalytics");
+            _sessionsDirectory = sessionsDirectory;
         }
 
         public void Start()
@@ -43,7 +44,9 @@ namespace GameAnalytics.Profiler.Network
 
             try
             {
+                Stop();
                 _listener = new TcpListener(IPAddress.Any, _port);
+                _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 _listener.Start();
                 _running = true;
 
@@ -56,7 +59,7 @@ namespace GameAnalytics.Profiler.Network
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GAProfiler] Failed to start TCP HTTP server: {e.Message}");
+                Debug.LogError($"[GAProfiler] Failed to start TCP HTTP server on port {_port}: {e.Message}");
                 _running = false;
             }
         }
@@ -67,6 +70,16 @@ namespace GameAnalytics.Profiler.Network
 
             try { _listener?.Stop(); } catch { }
             try { _listener = null; } catch { }
+            try
+            {
+                if (_listenerThread != null && _listenerThread.IsAlive)
+                    _listenerThread.Join(200);
+            }
+            catch { }
+            finally
+            {
+                _listenerThread = null;
+            }
 
             lock (_sseLock)
             {
@@ -173,6 +186,12 @@ namespace GameAnalytics.Profiler.Network
                 }
 
                 string body = string.Empty;
+                const int MaxBodySize = 1024 * 1024; // 1MB max
+                if (contentLength > MaxBodySize)
+                {
+                    WriteJson(stream, 413, "{\"error\":\"Payload too large\"}");
+                    return;
+                }
                 if (contentLength > 0)
                 {
                     var buffer = new char[contentLength];
@@ -247,6 +266,16 @@ namespace GameAnalytics.Profiler.Network
                 HandleStopCapture(stream);
                 return false;
             }
+            else if (method == "POST" && normalizedPath == "/deep-profiling/toggle")
+            {
+                HandleDeepProfilingToggle(stream, body);
+                return false;
+            }
+            else if (method == "GET" && normalizedPath.StartsWith("/sessions/") && normalizedPath.EndsWith("/deep-download"))
+            {
+                HandleDeepDataDownload(stream, normalizedPath);
+                return false;
+            }
             else
             {
                 WriteJson(stream, 404, "{\"error\":\"Not found\"}");
@@ -256,16 +285,46 @@ namespace GameAnalytics.Profiler.Network
 
         private void HandleStatus(NetworkStream stream)
         {
-            var status = new StatusResponse
+            StatusResponse status = null;
+            using (var done = new ManualResetEvent(false))
             {
-                deviceModel = SystemInfo.deviceModel,
-                projectName = Application.productName,
-                sdkVersion = "1.0.0",
-                capturing = _profiler.State == CaptureState.Capturing,
-                frameCount = _profiler.CapturedFrameCount,
-                elapsed = _profiler.CaptureElapsed,
-                currentFps = _profiler.CurrentFps
-            };
+                MainThreadDispatcher.Enqueue(() =>
+                {
+                    try
+                    {
+                        status = new StatusResponse
+                        {
+                            deviceModel = SystemInfo.deviceModel,
+                            projectName = Application.productName,
+                            sdkVersion = "1.0.0",
+                            capturing = _profiler.State == CaptureState.Capturing,
+                            frameCount = _profiler.CapturedFrameCount,
+                            elapsed = _profiler.CaptureElapsed,
+                            currentFps = _profiler.CurrentFps,
+                            deepCaptureEnabled = _profiler.config != null && _profiler.config.enableDeepCapture,
+                            hasDeepData = _profiler.HasDeepProfileData,
+                            deepDataSize = _profiler.DeepProfileDataSize
+                        };
+                    }
+                    finally
+                    {
+                        done.Set();
+                    }
+                });
+
+                if (!done.WaitOne(1000))
+                {
+                    WriteJson(stream, 504, "{\"error\":\"Status request timed out\"}");
+                    return;
+                }
+            }
+
+            if (status == null)
+            {
+                WriteJson(stream, 500, "{\"error\":\"Failed to build status snapshot\"}");
+                return;
+            }
+
             WriteJson(stream, 200, JsonUtility.ToJson(status));
         }
 
@@ -419,7 +478,9 @@ namespace GameAnalytics.Profiler.Network
                     $"\"sessionName\":\"{EscapeJson(sessionName)}\"," +
                     $"\"frameCount\":{exportInfo.frameCount}," +
                     $"\"duration\":{exportInfo.duration.ToString(CultureInfo.InvariantCulture)}," +
-                    $"\"screenshotCount\":{exportInfo.screenshotCount}" +
+                    $"\"screenshotCount\":{exportInfo.screenshotCount}," +
+                    $"\"isDeepProfile\":{(_profiler.HasDeepProfileData ? "true" : "false")}," +
+                    $"\"deepDataSize\":{_profiler.DeepProfileDataSize}" +
                     "}";
                 WriteJson(stream, 200, json);
             }
@@ -429,6 +490,165 @@ namespace GameAnalytics.Profiler.Network
                 done.Dispose();
             }
         }
+
+        private void HandleDeepProfilingToggle(NetworkStream stream, string body)
+        {
+            if (_profiler.State == CaptureState.Capturing)
+            {
+                WriteJson(stream, 409, "{\"error\":\"Cannot toggle deep profiling while capturing\"}");
+                return;
+            }
+
+            bool enabled = false;
+            if (!string.IsNullOrEmpty(body) && body.Contains("\"enabled\""))
+            {
+                enabled = body.Contains("true");
+            }
+
+            using (var done = new ManualResetEvent(false))
+            {
+                bool applied = false;
+                MainThreadDispatcher.Enqueue(() =>
+                {
+                    try
+                    {
+                        applied = _profiler.SetDeepCaptureEnabled(enabled);
+                    }
+                    finally
+                    {
+                        done.Set();
+                    }
+                });
+
+                if (!done.WaitOne(1000))
+                {
+                    WriteJson(stream, 504, "{\"error\":\"Toggle deep profiling timed out\"}");
+                    return;
+                }
+
+                if (!applied)
+                {
+                    WriteJson(stream, 500, "{\"error\":\"Failed to apply deep profiling state\"}");
+                    return;
+                }
+            }
+
+            bool actual = _profiler.config != null && _profiler.config.enableDeepCapture;
+            WriteJson(stream, 200, $"{{\"status\":\"ok\",\"deepCapture\":{(actual ? "true" : "false")}}}");
+        }
+
+        private void HandleDeepDataDownload(NetworkStream stream, string path)
+        {
+            // path: /sessions/{name}/deep-download
+            string[] parts = path.Split('/');
+            if (parts.Length < 4)
+            {
+                WriteJson(stream, 400, "{\"error\":\"Invalid path\"}");
+                return;
+            }
+
+            string sessionFileBaseName = Uri.UnescapeDataString(parts[2]);
+            string dataFilePath = _profiler.GetDeepProfileDataPathForSession(sessionFileBaseName);
+            if (string.IsNullOrEmpty(dataFilePath) || !File.Exists(dataFilePath))
+            {
+                WriteJson(stream, 404, "{\"error\":\"No deep profile data available\"}");
+                return;
+            }
+
+#if UNITY_EDITOR
+            string exportedPath;
+            string exportError;
+            if (TryExportDeepDataForCurrentEditor(dataFilePath, out exportedPath, out exportError))
+            {
+                if (!string.IsNullOrEmpty(exportedPath) && File.Exists(exportedPath))
+                {
+                    dataFilePath = exportedPath;
+                }
+            }
+            else if (!string.IsNullOrEmpty(exportError))
+            {
+                WriteJson(stream, 500, $"{{\"error\":\"{EscapeJson(exportError)}\"}}");
+                return;
+            }
+#endif
+
+            using (var fs = File.OpenRead(dataFilePath))
+            {
+                string fileName = Path.GetFileName(dataFilePath);
+                string headers =
+                    "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/octet-stream\r\n" +
+                    $"Content-Length: {fs.Length}\r\n" +
+                    $"Content-Disposition: attachment; filename=\"{fileName}\"\r\n" +
+                    "Access-Control-Allow-Origin: *\r\n" +
+                    "Connection: close\r\n\r\n";
+                byte[] headerBytes = Encoding.UTF8.GetBytes(headers);
+                stream.Write(headerBytes, 0, headerBytes.Length);
+
+                // Stream in chunks for large files
+                byte[] buffer = new byte[65536]; // 64KB chunks
+                int read;
+                while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    stream.Write(buffer, 0, read);
+                }
+                stream.Flush();
+            }
+        }
+
+#if UNITY_EDITOR
+        private static bool TryExportDeepDataForCurrentEditor(string rawPath, out string exportPath, out string error)
+        {
+            string resultPath = null;
+            string resultError = null;
+
+            using (var done = new ManualResetEvent(false))
+            {
+                MainThreadDispatcher.Enqueue(() =>
+                {
+                    try
+                    {
+                        var exporterType = Type.GetType("GameAnalytics.Profiler.Editor.DeepProfileExporter, GameAnalytics.Profiler.Editor");
+                        if (exporterType == null)
+                        {
+                            resultError = "DeepProfileExporter type not found in editor assembly";
+                            return;
+                        }
+
+                        var method = exporterType.GetMethod("ExportForRuntime", BindingFlags.Public | BindingFlags.Static);
+                        if (method == null)
+                        {
+                            resultError = "DeepProfileExporter.ExportForRuntime not found";
+                            return;
+                        }
+
+                        resultPath = method.Invoke(null, new object[] { rawPath }) as string;
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        resultError = tie.InnerException != null ? tie.InnerException.ToString() : tie.ToString();
+                    }
+                    catch (Exception ex)
+                    {
+                        resultError = ex.ToString();
+                    }
+                    finally
+                    {
+                        done.Set();
+                    }
+                });
+
+                if (!done.WaitOne(30000))
+                {
+                    resultError = "Timed out while exporting deep profiler data in current Unity Editor";
+                }
+            }
+
+            exportPath = resultPath;
+            error = resultError;
+            return string.IsNullOrEmpty(resultError);
+        }
+#endif
 
         private static void WriteJson(NetworkStream stream, int status, string json)
         {
@@ -481,6 +701,9 @@ namespace GameAnalytics.Profiler.Network
             public int frameCount;
             public float elapsed;
             public float currentFps;
+            public bool deepCaptureEnabled;
+            public bool hasDeepData;
+            public long deepDataSize;
         }
 
         [Serializable]

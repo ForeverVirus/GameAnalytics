@@ -5,6 +5,8 @@ import { useAppStore } from '../../store';
 import FrameTimeline from './FrameTimeline';
 import MetricCards from './MetricCards';
 import FunctionTable from './FunctionTable';
+import ResizableTable from './ResizableTable';
+import { getCachedFrameFunctions, getCachedModuleAnalysis, setCachedFrameFunctions, setCachedModuleAnalysis } from '../../utils/deviceReportCache';
 
 interface ModulePageProps {
   filePath: string;
@@ -24,15 +26,25 @@ export const ModulePage: React.FC<ModulePageProps> = ({ filePath, moduleName }) 
   const globalAiLoading = useAppStore(s => s.aiLoading);
   const globalAiNodeId = useAppStore(s => s.aiNodeId);
   const aiLiveLog = useAppStore(s => s.aiLiveLog);
-
   useEffect(() => {
+    const cached = getCachedModuleAnalysis(filePath, moduleName);
+    if (cached) {
+      setAnalysis(cached);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setSelectedPoint(null);
     setSelectedFrameFunctions(null);
     setSelectedFrameLoaded(false);
     api.getModuleAnalysis(filePath, moduleName)
-      .then(data => { setAnalysis(data); setLoading(false); })
+      .then(data => {
+        setCachedModuleAnalysis(filePath, moduleName, data);
+        setAnalysis(data);
+        setLoading(false);
+      })
       .catch(err => { setError(String(err)); setLoading(false); });
   }, [filePath, moduleName]);
 
@@ -104,7 +116,11 @@ export const ModulePage: React.FC<ModulePageProps> = ({ filePath, moduleName }) 
 
     setSelectedFrameLoading(true);
     try {
-      const data = await api.getFrameFunctions(filePath, point.frame_index, moduleCategoryIds[moduleName], true);
+      const cached = getCachedFrameFunctions(filePath, point.frame_index, moduleCategoryIds[moduleName], true);
+      const data = cached ?? await api.getFrameFunctions(filePath, point.frame_index, moduleCategoryIds[moduleName], true);
+      if (!cached && data) {
+        setCachedFrameFunctions(filePath, point.frame_index, data, moduleCategoryIds[moduleName], true);
+      }
       setSelectedFrameFunctions(data);
     } finally {
       setSelectedFrameLoading(false);
@@ -215,25 +231,24 @@ export const ModulePage: React.FC<ModulePageProps> = ({ filePath, moduleName }) 
                   选中帧 #{selectedFrameIndex} 没有匹配样本，已回退到最近的采样帧 #{selectedFrameFunctions.frame_index}。
                 </div>
               )}
-              <div style={{ overflow: 'auto', maxHeight: 320 }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                <thead>
-                  <tr style={{ background: '#0f3460' }}>
-                    <th style={thStyle}>函数名</th>
-                    <th style={thStyle}>分类</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Self (ms)</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Total (ms)</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Calls</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Depth</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <ResizableTable
+                columns={[
+                  { key: 'name', label: '函数名', width: 460, minWidth: 260 },
+                  { key: 'category', label: '分类', width: 120, minWidth: 80 },
+                  { key: 'self_ms', label: 'Self (ms)', width: 100, minWidth: 80, align: 'right' },
+                  { key: 'total_ms', label: 'Total (ms)', width: 100, minWidth: 80, align: 'right' },
+                  { key: 'calls', label: 'Calls', width: 90, minWidth: 70, align: 'right' },
+                  { key: 'depth', label: 'Depth', width: 80, minWidth: 60, align: 'right' },
+                ]}
+                rowCount={selectedFrameFunctions.functions.length}
+                maxHeight={320}
+              >
                   {selectedFrameFunctions.functions
                     .slice()
                     .sort((a, b) => b.self_ms - a.self_ms)
                     .map((fn, i) => (
                       <tr key={`${fn.name}-${i}`} style={{ background: i % 2 === 0 ? '#1a1a2e' : '#16213e' }}>
-                        <td style={{ ...tdStyle, fontFamily: 'monospace', paddingLeft: 8 + fn.depth * 12 }}>{fn.name}</td>
+                        <td style={{ ...tdStyle, fontFamily: 'monospace', paddingLeft: 8 + fn.depth * 12, whiteSpace: 'nowrap' }} title={fn.name}>{fn.name}</td>
                         <td style={tdStyle}>{fn.category}</td>
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.self_ms.toFixed(3)}</td>
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.total_ms.toFixed(3)}</td>
@@ -241,9 +256,7 @@ export const ModulePage: React.FC<ModulePageProps> = ({ filePath, moduleName }) 
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.depth}</td>
                       </tr>
                     ))}
-                </tbody>
-              </table>
-              </div>
+              </ResizableTable>
             </div>
           )}
           {!selectedFrameLoading && supportsFrameFunctions && selectedFrameLoaded && (!selectedFrameFunctions || selectedFrameFunctions.functions.length === 0) && (
@@ -292,15 +305,6 @@ export const ModulePage: React.FC<ModulePageProps> = ({ filePath, moduleName }) 
       </div>
     </div>
   );
-};
-
-const thStyle: React.CSSProperties = {
-  padding: '6px 8px',
-  textAlign: 'left',
-  borderBottom: '1px solid #333',
-  color: '#888',
-  fontSize: 11,
-  whiteSpace: 'nowrap',
 };
 
 const tdStyle: React.CSSProperties = {

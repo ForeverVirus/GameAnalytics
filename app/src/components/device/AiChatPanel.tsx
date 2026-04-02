@@ -6,16 +6,17 @@ import { useAppStore } from '../../store';
 interface AiChatPanelProps {
   filePath: string;
   context?: string;
+  messages: ChatMessage[];
+  onMessagesChange: (messages: ChatMessage[]) => void;
 }
 
-interface ChatMessage {
+export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
 }
 
-export const AiChatPanel: React.FC<AiChatPanelProps> = ({ filePath, context }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export const AiChatPanel: React.FC<AiChatPanelProps> = ({ filePath, context, messages, onMessagesChange }) => {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const settings = useAppStore(s => s.settings);
@@ -39,7 +40,8 @@ export const AiChatPanel: React.FC<AiChatPanelProps> = ({ filePath, context }) =
       content: input.trim(),
       timestamp: new Date().toLocaleTimeString(),
     };
-    setMessages(prev => [...prev, userMsg]);
+    const nextMessages = [...messages, userMsg];
+    onMessagesChange(nextMessages);
     setInput('');
 
     useAppStore.setState({
@@ -54,7 +56,7 @@ export const AiChatPanel: React.FC<AiChatPanelProps> = ({ filePath, context }) =
       const cliName = settings?.ai_cli || 'claude';
       const model = settings?.ai_model || undefined;
       const thinking = settings?.ai_thinking || undefined;
-      const history = messages
+      const history = nextMessages
         .slice(-6)
         .map(msg => `${msg.role === 'user' ? 'User' : msg.role === 'assistant' ? 'Assistant' : 'System'}: ${msg.content}`)
         .join('\n');
@@ -78,14 +80,14 @@ export const AiChatPanel: React.FC<AiChatPanelProps> = ({ filePath, context }) =
         content: result.analysis,
         timestamp: new Date().toLocaleTimeString(),
       };
-      setMessages(prev => [...prev, aiMsg]);
+      onMessagesChange([...nextMessages, aiMsg]);
     } catch (err) {
       const errMsg: ChatMessage = {
         role: 'system',
         content: `错误: ${String(err)}`,
         timestamp: new Date().toLocaleTimeString(),
       };
-      setMessages(prev => [...prev, errMsg]);
+      onMessagesChange([...nextMessages, errMsg]);
       useAppStore.setState({ error: String(err) });
     } finally {
       unlistenLog?.();

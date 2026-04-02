@@ -160,6 +160,9 @@
     "filePath": "文件路径",
     "viewDetails": "查看详情"
   },
+  "device": {
+    "deepCapture": "深度采集（与设备端同步）"
+  },
   "progress": {
     "analyzing": "项目分析中",
     "scan": "静态扫描",

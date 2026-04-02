@@ -16,6 +16,7 @@ use crate::device_profile;
 use crate::device_transfer;
 use crate::graph::model::*;
 use crate::graph::store::{FrontendGraph, GraphStore};
+use crate::profiler_data_parser;
 use crate::profiler_report;
 use crate::profiler_session;
 use crate::unity_connection;
@@ -54,6 +55,31 @@ fn require_project_info(state: &State<'_, AppState>) -> Result<workspace::Projec
 
 fn require_project_path(state: &State<'_, AppState>) -> Result<String, String> {
     Ok(require_project_info(state)?.path)
+}
+
+fn device_debug_log_path(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    if let Some(project) = cloned_project_info(state)? {
+        Ok(PathBuf::from(project.path).join(".analytics").join("logs").join("device_profile_debug.log"))
+    } else {
+        Ok(std::env::temp_dir().join("GameAnalytics").join("device_profile_debug.log"))
+    }
+}
+
+fn append_device_debug_log_line(state: &State<'_, AppState>, scope: &str, line: &str) -> Result<(), String> {
+    let path = device_debug_log_path(state)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Create debug log dir: {}", e))?;
+    }
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let full_line = format!("[{}] [{}] {}\n", stamp, scope, line);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Open debug log: {}", e))?;
+    use std::io::Write;
+    file.write_all(full_line.as_bytes()).map_err(|e| format!("Write debug log: {}", e))?;
+    Ok(())
 }
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -3354,6 +3380,212 @@ pub async fn remote_stop_capture(
 }
 
 #[tauri::command]
+pub async fn remote_toggle_deep_profiling(
+    ip: String,
+    port: u16,
+    enabled: bool,
+) -> Result<bool, String> {
+    device_transfer::remote_toggle_deep_profiling(&ip, port, enabled).await
+}
+
+fn read_unity_project_version(project_path: &str) -> Result<String, String> {
+    let version_file = PathBuf::from(project_path).join("ProjectSettings").join("ProjectVersion.txt");
+    let content = std::fs::read_to_string(&version_file)
+        .map_err(|e| format!("Read ProjectVersion.txt: {}", e))?;
+    let version = content
+        .lines()
+        .find_map(|line| line.strip_prefix("m_EditorVersion:"))
+        .map(|v| v.trim().to_string())
+        .ok_or("Unable to read Unity editor version from ProjectVersion.txt".to_string())?;
+    Ok(version)
+}
+
+fn unity_hub_secondary_install_path() -> Option<PathBuf> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let path = PathBuf::from(appdata).join("UnityHub").join("secondaryInstallPath.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<String>(&content).ok().map(PathBuf::from)
+}
+
+fn find_unity_editor_path(version: &str) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+
+    if let Some(secondary) = unity_hub_secondary_install_path() {
+        candidates.push(secondary.join(version).join("Editor").join("Unity.exe"));
+    }
+
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        candidates.push(PathBuf::from(&program_files).join("Unity Hub").join("Editor").join(version).join("Editor").join("Unity.exe"));
+        candidates.push(PathBuf::from(&program_files).join("Unity").join("Hub").join("Editor").join(version).join("Editor").join("Unity.exe"));
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!("Unable to locate Unity Editor for version {}", version))
+}
+
+async fn export_pd3u_with_unity(project_path: &str, deep_raw_path: &str) -> Result<PathBuf, String> {
+    let unity_version = read_unity_project_version(project_path)?;
+    let unity_editor = find_unity_editor_path(&unity_version)?;
+
+    let export_path = PathBuf::from(format!("{}.gadp", deep_raw_path));
+    let log_path = PathBuf::from(format!("{}.unity-export.log", deep_raw_path));
+
+    let raw_meta = std::fs::metadata(deep_raw_path).map_err(|e| format!("Read deep raw metadata: {}", e))?;
+    if export_path.is_file() {
+        if let (Ok(exported_meta), Ok(raw_mtime), Ok(export_mtime)) = (
+            std::fs::metadata(&export_path),
+            raw_meta.modified(),
+            std::fs::metadata(&export_path).and_then(|m| m.modified()),
+        ) {
+            let _ = exported_meta;
+            if export_mtime >= raw_mtime {
+                return Ok(export_path);
+            }
+        }
+    }
+
+    let mut cmd = TokioCommand::new(&unity_editor);
+    cmd.arg("-batchmode")
+        .arg("-quit")
+        .arg("-nographics")
+        .arg("-projectPath")
+        .arg(project_path)
+        .arg("-executeMethod")
+        .arg("GameAnalytics.Profiler.Editor.DeepProfileExporter.ExportFromCommandLine")
+        .arg("-gaDeepRawPath")
+        .arg(deep_raw_path)
+        .arg("-gaDeepExportPath")
+        .arg(&export_path)
+        .arg("-logFile")
+        .arg(&log_path);
+
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(1200), cmd.output())
+        .await
+        .map_err(|_| "Unity batchmode export timed out".to_string())?
+        .map_err(|e| format!("Failed to start Unity batchmode export: {}", e))?;
+
+    if !output.status.success() || !export_path.is_file() {
+        let log_tail = std::fs::read_to_string(&log_path)
+            .map(|s| {
+                let mut lines: Vec<&str> = s.lines().rev().take(40).collect();
+                lines.reverse();
+                lines.join("\n")
+            })
+            .unwrap_or_else(|_| String::from_utf8_lossy(&output.stderr).to_string());
+
+        return Err(format!(
+            "Unity deep export failed (editor={}, version={}, exit={:?}). Log:\n{}",
+            unity_editor.display(),
+            unity_version,
+            output.status.code(),
+            log_tail
+        ));
+    }
+
+    Ok(export_path)
+}
+
+fn deep_sidecar_candidates(file_path: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(base) = file_path.strip_suffix(".gaprof") {
+        candidates.push(PathBuf::from(format!("{}.deep.data.gadp", base)));
+        candidates.push(PathBuf::from(format!("{}.deep.gadp", base)));
+        candidates.push(PathBuf::from(format!("{}.deep.data", base)));
+        candidates.push(PathBuf::from(format!("{}.deep.raw", base)));
+        candidates.push(PathBuf::from(format!("{}.deep.raw.gadp", base)));
+    }
+    candidates
+}
+
+async fn load_gaprof_session_with_optional_deep(
+    file_path: &str,
+    project_path: Option<&str>,
+) -> Result<device_profile::GaprofSession, String> {
+    let data = std::fs::read(file_path).map_err(|e| format!("Read gaprof '{}': {}", file_path, e))?;
+    let mut session = device_profile::parse_gaprof(&data)
+        .map_err(|e| format!("Parse gaprof '{}': {}", file_path, e))?;
+
+    let mut deep_path = None;
+    for candidate in deep_sidecar_candidates(file_path) {
+        if candidate.is_file() {
+            deep_path = Some(candidate);
+            break;
+        }
+    }
+
+    if let Some(path) = deep_path {
+        let deep_bytes = std::fs::read(&path)
+            .map_err(|e| format!("Read deep sidecar '{}': {}", path.display(), e))?;
+        let actual_deep_path = if deep_bytes.len() >= 4 && &deep_bytes[..4] == b"PD3U" {
+            let project_path = project_path.ok_or_else(|| {
+                format!("Deep sidecar '{}' is PD3U and requires a Unity project context for export", path.display())
+            })?;
+            export_pd3u_with_unity(project_path, &path.to_string_lossy()).await?
+        } else {
+            path
+        };
+
+        profiler_data_parser::merge_deep_profile_into_session(&mut session, &actual_deep_path.to_string_lossy())
+            .map_err(|e| format!("Merge deep sidecar '{}' into '{}': {}", actual_deep_path.display(), file_path, e))?;
+    }
+
+    Ok(session)
+}
+
+#[tauri::command]
+pub async fn remote_download_deep_profile(
+    ip: String,
+    port: u16,
+    session_name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let save_dir = {
+        let project = state.project.lock().map_err(|e| e.to_string())?;
+        if let Some(project_info) = project.as_ref() {
+            PathBuf::from(&project_info.path)
+                .join(".analytics")
+                .join("device_profiles")
+        } else {
+            std::env::temp_dir()
+                .join("GameAnalytics")
+                .join("device_profiles")
+        }
+    };
+    std::fs::create_dir_all(&save_dir).map_err(|e| e.to_string())?;
+    device_transfer::download_deep_profile(&ip, port, &session_name, &save_dir.to_string_lossy()).await
+}
+
+#[tauri::command]
+pub async fn append_device_debug_log(
+    scope: String,
+    message: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    append_device_debug_log_line(&state, &scope, &message)
+}
+
+#[tauri::command]
+pub async fn read_device_debug_log(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let path = device_debug_log_path(&state)?;
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("Read debug log: {}", e))
+}
+
+#[tauri::command]
 pub async fn import_gaprof_file(
     file_path: String,
     state: State<'_, AppState>,
@@ -3380,9 +3612,12 @@ pub async fn import_gaprof_file(
 }
 
 #[tauri::command]
-pub async fn parse_gaprof_session(file_path: String) -> Result<device_profile::DeviceProfileReport, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+pub async fn parse_gaprof_session(
+    file_path: String,
+    state: State<'_, AppState>,
+) -> Result<device_profile::DeviceProfileReport, String> {
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let session_name = PathBuf::from(&file_path)
         .file_stem()
@@ -3398,10 +3633,10 @@ pub async fn parse_gaprof_session(file_path: String) -> Result<device_profile::D
 pub async fn generate_device_report(
     file_path: String,
     _app: tauri::AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
 ) -> Result<device_profile::DeviceProfileReport, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let session_name = PathBuf::from(&file_path)
         .file_stem()
@@ -3414,12 +3649,57 @@ pub async fn generate_device_report(
 }
 
 #[tauri::command]
+pub async fn load_deep_profile(
+    gaprof_path: String,
+    deep_data_path: String,
+    state: State<'_, AppState>,
+) -> Result<device_profile::DeviceProfileReport, String> {
+    let data = std::fs::read(&gaprof_path)
+        .map_err(|e| format!("Read gaprof '{}': {}", gaprof_path, e))?;
+    let mut session = device_profile::parse_gaprof(&data)
+        .map_err(|e| format!("Parse gaprof '{}': {}", gaprof_path, e))?;
+
+    let deep_magic = std::fs::read(&deep_data_path)
+        .map_err(|e| format!("Read deep profile '{}': {}", deep_data_path, e))?;
+    let actual_deep_path = if deep_magic.len() >= 4 && &deep_magic[..4] == b"PD3U" {
+        let project = require_project_info(&state)?;
+        export_pd3u_with_unity(&project.path, &deep_data_path).await?
+    } else {
+        PathBuf::from(&deep_data_path)
+    };
+
+    if actual_deep_path.is_file() && actual_deep_path.extension().and_then(|e| e.to_str()) == Some("gadp") {
+        let persisted_sidecar = PathBuf::from(format!("{}.deep.gadp", gaprof_path.strip_suffix(".gaprof").unwrap_or(&gaprof_path)));
+        if persisted_sidecar != actual_deep_path {
+            std::fs::copy(&actual_deep_path, &persisted_sidecar)
+                .map_err(|e| format!("Persist deep sidecar '{}' -> '{}': {}", actual_deep_path.display(), persisted_sidecar.display(), e))?;
+        }
+    }
+
+    // Merge deep profile data into the session
+    let _merge_result = profiler_data_parser::merge_deep_profile_into_session(
+        &mut session,
+        &actual_deep_path.to_string_lossy(),
+    ).map_err(|e| format!("Merge deep profile '{}' into '{}': {}", actual_deep_path.display(), gaprof_path, e))?;
+
+    let session_name = PathBuf::from(&gaprof_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Unknown".into());
+
+    let mut report = device_profile::generate_report(&session, &session_name);
+    report.source_file_path = Some(gaprof_path);
+    Ok(report)
+}
+
+#[tauri::command]
 pub async fn get_device_screenshot(
     file_path: String,
     frame_index: u32,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let screenshot = session.screenshots.iter()
         .find(|s| s.frame_index == frame_index)
@@ -3462,9 +3742,10 @@ pub async fn get_frame_functions(
     frame_index: u32,
     category_filters: Option<Vec<u8>>,
     prefer_nearest: Option<bool>,
+    state: State<'_, AppState>,
 ) -> Result<Option<device_profile::PerFrameFunctions>, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     let categories = category_filters.map(|items| {
         items.into_iter()
             .map(device_profile::FunctionCategory::from_u8)
@@ -3532,9 +3813,10 @@ pub async fn get_session_logs(
     file_path: String,
     log_type_filter: Option<u8>,
     limit: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<device_profile::LogEntry>, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let max = limit.unwrap_or(500);
     let entries: Vec<device_profile::LogEntry> = session.log_entries.into_iter()
@@ -3555,8 +3837,8 @@ pub async fn run_ai_device_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DeviceAiAnalysis, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let session_name = PathBuf::from(&file_path)
         .file_stem()
@@ -3634,8 +3916,8 @@ pub async fn run_ai_module_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DeviceAiAnalysis, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     let module = crate::module_analysis::generate_module_analysis(&session, &module_name)?;
 
     let session_name = PathBuf::from(&file_path)
@@ -3710,8 +3992,8 @@ pub async fn run_ai_device_chat(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DeviceAiAnalysis, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
 
     let session_name = PathBuf::from(&file_path)
         .file_stem()
@@ -3859,9 +4141,10 @@ fn build_device_chat_prompt(
 pub async fn get_module_analysis(
     file_path: String,
     module_name: String,
+    state: State<'_, AppState>,
 ) -> Result<crate::module_analysis::ModulePageAnalysis, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     crate::module_analysis::generate_module_analysis(&session, &module_name)
 }
 
@@ -3869,9 +4152,10 @@ pub async fn get_module_analysis(
 #[tauri::command]
 pub async fn get_resource_memory_analysis(
     file_path: String,
+    state: State<'_, AppState>,
 ) -> Result<crate::module_analysis::ResourceMemoryAnalysis, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     Ok(crate::module_analysis::generate_resource_memory_analysis(&session))
 }
 
@@ -3884,9 +4168,10 @@ pub async fn get_call_tree(
     frame_end: Option<u32>,
     direction: Option<String>,
     top_n: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<crate::call_tree::CallTreeNode>, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     let cat = category_filter.map(device_profile::FunctionCategory::from_u8);
     let dir = direction.as_deref().unwrap_or("forward");
     let n = Some(top_n.unwrap_or(50));
@@ -3898,9 +4183,10 @@ pub async fn get_call_tree(
 pub async fn search_device_functions(
     file_path: String,
     query: String,
+    state: State<'_, AppState>,
 ) -> Result<Vec<crate::call_tree::FunctionSearchResult>, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project.as_ref().map(|p| p.path.as_str())).await?;
     Ok(crate::call_tree::search_functions(&session, &query))
 }
 
@@ -3910,8 +4196,8 @@ pub async fn save_device_report(
     file_path: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let data = std::fs::read(&file_path).map_err(|e| format!("Read file: {}", e))?;
-    let session = device_profile::parse_gaprof(&data)?;
+    let project_for_session = cloned_project_info(&state)?;
+    let session = load_gaprof_session_with_optional_deep(&file_path, project_for_session.as_ref().map(|p| p.path.as_str())).await?;
     let session_name = PathBuf::from(&file_path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())

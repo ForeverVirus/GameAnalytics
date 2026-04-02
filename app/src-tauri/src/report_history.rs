@@ -47,8 +47,13 @@ pub fn save_report(project_path: &str, report: &DeviceProfileReport) -> Result<S
         chrono::Utc::now().format("%Y%m%d%H%M%S")
     );
 
-    // Save full report JSON
-    let report_json = serde_json::to_string(report)
+    // Save a compact report JSON for history loading.
+    let mut compact_report = report.clone();
+    if let Some(function_analysis) = compact_report.function_analysis.as_mut() {
+        function_analysis.per_frame_data.clear();
+    }
+
+    let report_json = serde_json::to_string(&compact_report)
         .map_err(|e| format!("Serialize report: {}", e))?;
     std::fs::write(report_file(project_path, &id), &report_json)
         .map_err(|e| format!("Write report: {}", e))?;

@@ -7,6 +7,9 @@ use std::collections::HashMap;
 
 use crate::device_profile::{FunctionCategory, FunctionSample, GaprofSession};
 
+const MAX_CALL_TREE_DEPTH: u8 = 8;
+const MAX_CHILDREN_PER_NODE: usize = 40;
+
 // ======================== Data Structures ========================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,9 +152,15 @@ fn build_forward_tree(
         grand_self_total: f64,
         grand_total_total: f64,
         max_depth: u8,
+        path: &mut Vec<(u16, i32)>,
     ) -> Option<CallTreeNode> {
         let key = (name_idx, parent_name);
         let a = accum.get(&key)?;
+
+        if path.contains(&key) {
+            return None;
+        }
+        path.push(key);
 
         let name = string_table.get(name_idx as usize)
             .cloned()
@@ -162,11 +171,19 @@ fn build_forward_tree(
         let mut children = Vec::new();
         if a.depth < max_depth {
             if let Some(child_keys) = children_map.get(&(name_idx as i32)) {
-                for &(child_name, child_parent) in child_keys {
+                let mut sorted_child_keys = child_keys.clone();
+                sorted_child_keys.sort_by(|(child_name_a, child_parent_a), (child_name_b, child_parent_b)| {
+                    let total_a = accum.get(&(*child_name_a, *child_parent_a)).map(|v| v.total_time_sum).unwrap_or(0.0);
+                    let total_b = accum.get(&(*child_name_b, *child_parent_b)).map(|v| v.total_time_sum).unwrap_or(0.0);
+                    total_b.partial_cmp(&total_a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                sorted_child_keys.truncate(MAX_CHILDREN_PER_NODE);
+
+                for (child_name, child_parent) in sorted_child_keys {
                     if let Some(child_node) = build_node(
                         child_name, child_parent, accum, children_map,
                         string_table, sampled_count, grand_self_total, grand_total_total,
-                        max_depth,
+                        max_depth, path,
                     ) {
                         children.push(child_node);
                     }
@@ -174,6 +191,8 @@ fn build_forward_tree(
                 children.sort_by(|a, b| b.total_self_ms.partial_cmp(&a.total_self_ms).unwrap_or(std::cmp::Ordering::Equal));
             }
         }
+
+        path.pop();
 
         Some(CallTreeNode {
             name,
@@ -197,10 +216,11 @@ fn build_forward_tree(
     let mut roots: Vec<CallTreeNode> = Vec::new();
     if let Some(root_keys) = children_map.get(&-1) {
         for &(name_idx, parent_name) in root_keys {
+            let mut path = Vec::new();
             if let Some(node) = build_node(
                 name_idx, parent_name, &accum, &children_map,
                 &session.string_table, sampled_count,
-                grand_self_total, grand_total_total, 10,
+                grand_self_total, grand_total_total, MAX_CALL_TREE_DEPTH, &mut path,
             ) {
                 roots.push(node);
             }
@@ -297,6 +317,7 @@ fn build_reverse_tree(
         if let Some(callers) = caller_map.get(&name_idx) {
             let mut caller_entries: Vec<_> = callers.iter().collect();
             caller_entries.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+            caller_entries.truncate(MAX_CHILDREN_PER_NODE);
             for (caller_idx, _) in caller_entries {
                 if let Some(child) = build_reverse_node(
                     *caller_idx,

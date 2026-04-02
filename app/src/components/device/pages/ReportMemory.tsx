@@ -3,6 +3,7 @@ import { api } from '../../../api/tauri';
 import type { DeviceProfileReport, ResourceMemoryAnalysis } from '../../../api/tauri';
 import FrameTimeline from '../FrameTimeline';
 import MetricCards from '../MetricCards';
+import { getCachedResourceMemoryAnalysis, setCachedResourceMemoryAnalysis } from '../../../utils/deviceReportCache';
 
 interface ReportMemoryProps {
   filePath: string;
@@ -15,14 +16,22 @@ export const ReportMemory: React.FC<ReportMemoryProps> = ({ filePath, report }) 
   const [tab, setTab] = useState<MemoryTab>('overview');
   const [resourceData, setResourceData] = useState<ResourceMemoryAnalysis | null>(null);
   const [loadingResource, setLoadingResource] = useState(false);
-
   const m = report.memory_analysis;
 
   useEffect(() => {
     if (tab === 'resource' && !resourceData) {
+      const cached = getCachedResourceMemoryAnalysis(filePath);
+      if (cached) {
+        setResourceData(cached);
+        return;
+      }
       setLoadingResource(true);
       api.getResourceMemoryAnalysis(filePath)
-        .then(data => { setResourceData(data); setLoadingResource(false); })
+        .then(data => {
+          setCachedResourceMemoryAnalysis(filePath, data);
+          setResourceData(data);
+          setLoadingResource(false);
+        })
         .catch(() => setLoadingResource(false));
     }
   }, [tab, filePath, resourceData]);

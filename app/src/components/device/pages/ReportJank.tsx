@@ -3,6 +3,8 @@ import { api } from '../../../api/tauri';
 import type { DeviceProfileReport, PerFrameFunctions, TimelinePoint } from '../../../api/tauri';
 import FrameTimeline from '../FrameTimeline';
 import MetricCards from '../MetricCards';
+import ResizableTable from '../ResizableTable';
+import { getCachedFrameFunctions, setCachedFrameFunctions } from '../../../utils/deviceReportCache';
 
 interface ReportJankProps {
   filePath: string;
@@ -39,11 +41,22 @@ export const ReportJank: React.FC<ReportJankProps> = ({ filePath, report }) => {
       return;
     }
 
+    const frameIndex = selectedJankPoint.frame_index;
+    const cached = getCachedFrameFunctions(filePath, frameIndex, undefined, true);
+    if (cached) {
+      setFrameFunctions(cached);
+      setLoadingFrame(false);
+      return;
+    }
+
     let cancelled = false;
     setLoadingFrame(true);
-    api.getFrameFunctions(filePath, selectedJankPoint.frame_index, undefined, true)
+    api.getFrameFunctions(filePath, frameIndex, undefined, true)
       .then(data => {
         if (!cancelled) {
+          if (data) {
+            setCachedFrameFunctions(filePath, frameIndex, data, undefined, true);
+          }
           setFrameFunctions(data);
         }
       })
@@ -120,32 +133,31 @@ export const ReportJank: React.FC<ReportJankProps> = ({ filePath, report }) => {
                   该卡顿帧没有精确函数样本，已回退到最近采样帧 #{frameFunctions.frame_index}。
                 </div>
               )}
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                <thead>
-                  <tr style={{ background: '#0f3460' }}>
-                    <th style={thStyle}>函数名</th>
-                    <th style={thStyle}>分类</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Self</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Total</th>
-                    <th style={{ ...thStyle, textAlign: 'right' }}>Calls</th>
-                  </tr>
-                </thead>
-                <tbody>
+              <ResizableTable
+                columns={[
+                  { key: 'name', label: '函数名', width: 460, minWidth: 260 },
+                  { key: 'category', label: '分类', width: 120, minWidth: 80 },
+                  { key: 'self', label: 'Self', width: 100, minWidth: 80, align: 'right' },
+                  { key: 'total', label: 'Total', width: 100, minWidth: 80, align: 'right' },
+                  { key: 'calls', label: 'Calls', width: 90, minWidth: 70, align: 'right' },
+                ]}
+                rowCount={frameFunctions.functions.length}
+                maxHeight={320}
+              >
                   {frameFunctions.functions
                     .slice()
                     .sort((a, b) => b.self_ms - a.self_ms)
                     .slice(0, 30)
                     .map((fn, index) => (
                       <tr key={`${fn.name}-${index}`} style={{ background: index % 2 === 0 ? '#1a1a2e' : '#16213e' }}>
-                        <td style={{ ...tdStyle, paddingLeft: 8 + fn.depth * 12, fontFamily: 'monospace' }}>{fn.name}</td>
+                        <td style={{ ...tdStyle, paddingLeft: 8 + fn.depth * 12, fontFamily: 'monospace', whiteSpace: 'nowrap' }} title={fn.name}>{fn.name}</td>
                         <td style={tdStyle}>{fn.category}</td>
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.self_ms.toFixed(3)}ms</td>
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.total_ms.toFixed(3)}ms</td>
                         <td style={{ ...tdStyle, textAlign: 'right' }}>{fn.call_count}</td>
                       </tr>
                     ))}
-                </tbody>
-              </table>
+              </ResizableTable>
             </div>
           )}
           {filePath && !loadingFrame && (!frameFunctions || frameFunctions.functions.length === 0) && (
@@ -155,15 +167,6 @@ export const ReportJank: React.FC<ReportJankProps> = ({ filePath, report }) => {
       )}
     </div>
   );
-};
-
-const thStyle: React.CSSProperties = {
-  padding: '6px 8px',
-  textAlign: 'left',
-  borderBottom: '1px solid #333',
-  color: '#888',
-  fontSize: 11,
-  whiteSpace: 'nowrap',
 };
 
 const tdStyle: React.CSSProperties = {

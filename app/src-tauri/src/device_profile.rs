@@ -1424,29 +1424,10 @@ fn generate_function_analysis(session: &GaprofSession) -> Option<FunctionAnalysi
     }).collect();
     category_breakdown.sort_by(|a, b| b.total_ms.partial_cmp(&a.total_ms).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Per-frame data (limit to first 500 sampled frames to keep payload manageable)
-    let per_frame_data: Vec<PerFrameFunctions> = session.function_samples.iter()
-        .enumerate()
-        .filter(|(_, samples)| !samples.is_empty())
-        .take(500)
-        .map(|(frame_idx, samples)| {
-            let functions: Vec<PerFrameFunction> = samples.iter().map(|s| {
-                let name = session.string_table.get(s.function_name_index as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("Function_{}", s.function_name_index));
-                PerFrameFunction {
-                    name,
-                    category: s.category.label().to_string(),
-                    self_ms: s.self_time_ms,
-                    total_ms: s.total_time_ms,
-                    call_count: s.call_count,
-                    depth: s.depth,
-                    parent_index: s.parent_index,
-                    thread_index: s.thread_index,
-                }
-            }).collect();
-            PerFrameFunctions { frame_index: frame_idx as u32, functions }
-        }).collect();
+    // Per-frame function detail is loaded on demand via get_frame_functions.
+    // Keeping it out of the main report payload avoids huge Tauri responses
+    // and oversized history JSON when deep captures contain thousands of samples per frame.
+    let per_frame_data: Vec<PerFrameFunctions> = Vec::new();
 
     Some(FunctionAnalysis {
         has_data: true,

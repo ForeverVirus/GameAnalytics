@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import type { CallTreeNode } from '../../api/tauri';
+import ResizableTable from './ResizableTable';
 
 interface CallTreeTableProps {
   nodes: CallTreeNode[];
@@ -42,7 +43,7 @@ const CallTreeRow: React.FC<{
         background: highlight ? 'rgba(79, 195, 247, 0.15)' : depth % 2 === 0 ? '#1a1a2e' : '#16213e',
         fontSize: '12px',
       }}>
-        <td style={{ paddingLeft: `${depth * 20 + 8}px`, whiteSpace: 'nowrap', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <td style={{ paddingLeft: `${depth * 20 + 8}px`, whiteSpace: 'nowrap', color: CategoryColors[node.category] || '#ccc' }} title={node.name}>
           {hasChildren && (
             <span
               onClick={() => toggleExpand(key)}
@@ -52,7 +53,7 @@ const CallTreeRow: React.FC<{
             </span>
           )}
           {!hasChildren && <span style={{ display: 'inline-block', width: 16 }} />}
-          <span style={{ color: CategoryColors[node.category] || '#ccc' }}>{node.name}</span>
+          <span>{node.name}</span>
         </td>
         <td style={{ textAlign: 'right', color: '#aaa', minWidth: 60 }}>{node.category}</td>
         <td style={{ textAlign: 'right', color: node.avg_self_ms > 1 ? '#ffb74d' : '#ccc', minWidth: 70 }}>{node.avg_self_ms.toFixed(3)}</td>
@@ -124,37 +125,28 @@ export const CallTreeTable: React.FC<CallTreeTableProps> = ({ nodes, title, sear
     else { setSortCol(col); setSortDesc(true); }
   };
 
-  const headerStyle: React.CSSProperties = {
-    cursor: 'pointer', textAlign: 'right', padding: '6px 8px',
-    borderBottom: '1px solid #333', fontSize: '11px', color: '#888',
-    userSelect: 'none', whiteSpace: 'nowrap',
-  };
-
   const sortArrow = (col: string) => sortCol === col ? (sortDesc ? ' ▼' : ' ▲') : '';
+  const columns = [
+    { key: 'name', label: '函数名', width: 500, minWidth: 260 },
+    { key: 'category', label: '类别', width: 120, minWidth: 80, align: 'right' as const },
+    { key: 'avg_self_ms', label: `Self(avg)${sortArrow('avg_self_ms')}`, width: 110, minWidth: 90, align: 'right' as const, onHeaderClick: () => handleSort('avg_self_ms') },
+    { key: 'total_self_ms', label: `Self(total)${sortArrow('total_self_ms')}`, width: 110, minWidth: 90, align: 'right' as const, onHeaderClick: () => handleSort('total_self_ms') },
+    { key: 'self_pct', label: `Self%${sortArrow('self_pct')}`, width: 90, minWidth: 70, align: 'right' as const, onHeaderClick: () => handleSort('self_pct') },
+    { key: 'avg_total_ms', label: `Total(avg)${sortArrow('avg_total_ms')}`, width: 110, minWidth: 90, align: 'right' as const, onHeaderClick: () => handleSort('avg_total_ms') },
+    { key: 'total_total_ms', label: `Total(total)${sortArrow('total_total_ms')}`, width: 110, minWidth: 90, align: 'right' as const, onHeaderClick: () => handleSort('total_total_ms') },
+    { key: 'total_pct', label: `Total%${sortArrow('total_pct')}`, width: 90, minWidth: 70, align: 'right' as const, onHeaderClick: () => handleSort('total_pct') },
+    { key: 'call_count', label: `Calls${sortArrow('call_count')}`, width: 90, minWidth: 70, align: 'right' as const, onHeaderClick: () => handleSort('call_count') },
+    { key: 'calls_per_frame', label: `Calls/F${sortArrow('calls_per_frame')}`, width: 90, minWidth: 70, align: 'right' as const, onHeaderClick: () => handleSort('calls_per_frame') },
+  ];
 
   return (
-    <div style={{ overflow: 'auto', maxHeight: '500px' }}>
+    <div>
       {title && <div style={{ fontSize: 14, fontWeight: 600, color: '#ccc', marginBottom: 8 }}>{title}</div>}
       <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
         <button onClick={expandAll} style={{ fontSize: 11, cursor: 'pointer', background: '#333', color: '#aaa', border: '1px solid #555', borderRadius: 3, padding: '2px 8px' }}>全部展开</button>
         <button onClick={collapseAll} style={{ fontSize: 11, cursor: 'pointer', background: '#333', color: '#aaa', border: '1px solid #555', borderRadius: 3, padding: '2px 8px' }}>全部折叠</button>
       </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr style={{ background: '#0f3460' }}>
-            <th style={{ ...headerStyle, textAlign: 'left', paddingLeft: 8 }}>函数名</th>
-            <th style={headerStyle}>类别</th>
-            <th style={headerStyle} onClick={() => handleSort('avg_self_ms')}>Self(avg){sortArrow('avg_self_ms')}</th>
-            <th style={headerStyle} onClick={() => handleSort('total_self_ms')}>Self(total){sortArrow('total_self_ms')}</th>
-            <th style={headerStyle} onClick={() => handleSort('self_pct')}>Self%{sortArrow('self_pct')}</th>
-            <th style={headerStyle} onClick={() => handleSort('avg_total_ms')}>Total(avg){sortArrow('avg_total_ms')}</th>
-            <th style={headerStyle} onClick={() => handleSort('total_total_ms')}>Total(total){sortArrow('total_total_ms')}</th>
-            <th style={headerStyle} onClick={() => handleSort('total_pct')}>Total%{sortArrow('total_pct')}</th>
-            <th style={headerStyle} onClick={() => handleSort('call_count')}>Calls{sortArrow('call_count')}</th>
-            <th style={headerStyle} onClick={() => handleSort('calls_per_frame')}>Calls/F{sortArrow('calls_per_frame')}</th>
-          </tr>
-        </thead>
-        <tbody>
+      <ResizableTable columns={columns} rowCount={sortedNodes.length} maxHeight={500} emptyState="无函数数据">
           {sortedNodes.map((node, i) => (
             <CallTreeRow
               key={`${node.name}-${i}`}
@@ -165,11 +157,7 @@ export const CallTreeTable: React.FC<CallTreeTableProps> = ({ nodes, title, sear
               searchQuery={searchQuery}
             />
           ))}
-          {sortedNodes.length === 0 && (
-            <tr><td colSpan={10} style={{ textAlign: 'center', color: '#666', padding: 20 }}>无函数数据</td></tr>
-          )}
-        </tbody>
-      </table>
+      </ResizableTable>
     </div>
   );
 };

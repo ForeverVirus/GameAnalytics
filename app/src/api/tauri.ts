@@ -304,6 +304,9 @@ export interface DeviceStatus {
   frameCount: number;
   elapsed: number;
   currentFps: number;
+  deepCaptureEnabled?: boolean;
+  hasDeepData?: boolean;
+  deepDataSize?: number;
 }
 
 export interface DiscoveredDevice {
@@ -325,6 +328,8 @@ export interface RemoteStopCaptureResult {
   frameCount: number;
   duration: number;
   screenshotCount: number;
+  isDeepProfile?: boolean;
+  deepDataSize?: number;
 }
 
 export interface DeviceInfo {
@@ -696,6 +701,21 @@ export const api = {
 
   remoteStopCapture: (ip: string, port: number) =>
     invoke<RemoteStopCaptureResult>('remote_stop_capture', { ip, port }),
+
+  remoteToggleDeepProfiling: (ip: string, port: number, enabled: boolean) =>
+    invoke<boolean>('remote_toggle_deep_profiling', { ip, port, enabled }),
+
+  remoteDownloadDeepProfile: (ip: string, port: number, sessionName: string) =>
+    invoke<string>('remote_download_deep_profile', { ip, port, sessionName }),
+
+  appendDeviceDebugLog: (scope: string, message: string) =>
+    invoke<void>('append_device_debug_log', { scope, message }),
+
+  readDeviceDebugLog: () =>
+    invoke<string>('read_device_debug_log'),
+
+  loadDeepProfile: (gaprofPath: string, deepDataPath: string) =>
+    invoke<DeviceProfileReport>('load_deep_profile', { gaprofPath, deepDataPath }),
 
   importGaprofFile: (filePath: string) =>
     invoke<string>('import_gaprof_file', { filePath }),

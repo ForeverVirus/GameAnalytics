@@ -7,6 +7,7 @@ mod device_profile;
 mod device_transfer;
 mod graph;
 mod module_analysis;
+mod profiler_data_parser;
 mod profiler_report;
 mod profiler_session;
 mod report_history;
@@ -75,9 +76,14 @@ pub fn run() {
             commands::download_device_session,
             commands::remote_start_capture,
             commands::remote_stop_capture,
+            commands::remote_toggle_deep_profiling,
+            commands::remote_download_deep_profile,
+            commands::append_device_debug_log,
+            commands::read_device_debug_log,
             commands::import_gaprof_file,
             commands::parse_gaprof_session,
             commands::generate_device_report,
+            commands::load_deep_profile,
             commands::get_device_screenshot,
             commands::export_device_report,
             commands::get_frame_functions,

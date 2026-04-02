@@ -160,6 +160,9 @@
     "filePath": "File Path",
     "viewDetails": "View Details"
   },
+  "device": {
+    "deepCapture": "Deep Capture (sync with device)"
+  },
   "progress": {
     "analyzing": "Analyzing Project",
     "scan": "Static Scan",

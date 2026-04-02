@@ -73,6 +73,17 @@ namespace GameAnalytics.Profiler
         [Range(1, 10)]
         public int deepProfilingSampleRate = 1;
 
+        [Header("Deep Capture (Binary Log)")]
+        [Tooltip("Enable deep capture mode: writes Unity Profiler binary log to file for full call hierarchy analysis including user scripts")]
+        public bool enableDeepCapture = false;
+
+        [Tooltip("Maximum deep capture duration in seconds (0 = unlimited). Deep capture files can be very large.")]
+        [Range(0, 120)]
+        public int deepCaptureDurationLimit = 30;
+
+        [Tooltip("Automatically discover user script ProfilerMarker markers at runtime")]
+        public bool autoDiscoverMarkers = true;
+
         [Header("Resource Memory (v3)")]
         [Tooltip("Enable per-resource-type memory tracking (Texture, Mesh, etc.)")]
         public bool enableResourceMemory = false;

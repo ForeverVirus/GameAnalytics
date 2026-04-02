@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../../api/tauri';
+import { getCachedScreenshot, setCachedScreenshot } from '../../utils/deviceReportCache';
 
 interface ScreenshotViewerProps {
   filePath: string;
@@ -59,6 +60,14 @@ export const ScreenshotViewer: React.FC<ScreenshotViewerProps> = ({
       return;
     }
 
+    const cached = getCachedScreenshot(filePath, frame);
+    if (cached) {
+      setImageData(cached);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -66,6 +75,7 @@ export const ScreenshotViewer: React.FC<ScreenshotViewerProps> = ({
     api.getDeviceScreenshot(filePath, frame)
       .then(data => {
         if (!cancelled) {
+          setCachedScreenshot(filePath, frame, data);
           setImageData(data);
           setLoading(false);
         }

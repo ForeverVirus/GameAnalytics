@@ -16,6 +16,8 @@ namespace GameAnalytics.Profiler.UI
         private Rect _panelRect;
         private string _sessionName = "";
         private Vector2 _scrollPos;
+        private bool _deepCaptureToggle;
+        private bool _deepUploadRequested;
 
         private GUIStyle _buttonStyle;
         private GUIStyle _labelStyle;
@@ -108,7 +110,7 @@ namespace GameAnalytics.Profiler.UI
             // Expanded panel
             if (_expanded)
             {
-                _panelRect = new Rect(_buttonRect.x, _buttonRect.yMax + 4, 280, 360);
+                _panelRect = new Rect(_buttonRect.x, _buttonRect.yMax + 4, 280, 440);
 
                 // Clamp to screen
                 _panelRect.x = Mathf.Clamp(_panelRect.x, 0, Screen.width - _panelRect.width);
@@ -157,6 +159,25 @@ namespace GameAnalytics.Profiler.UI
                     _sessionName = GUILayout.TextField(_sessionName);
                     GUILayout.Space(4);
 
+                    // Deep Capture toggle (only when idle)
+                    var idleConfig = profiler.config;
+                    if (idleConfig != null)
+                    {
+                        GUILayout.BeginHorizontal();
+                        bool currentDeepCapture = idleConfig.enableDeepCapture;
+                        bool newDeepCapture = GUILayout.Toggle(currentDeepCapture, " 深度采集", GUILayout.Width(100));
+                        if (newDeepCapture != currentDeepCapture)
+                            profiler.SetDeepCaptureEnabled(newDeepCapture);
+                        _deepCaptureToggle = profiler.config != null && profiler.config.enableDeepCapture;
+                        if (_deepCaptureToggle)
+                            GUILayout.Label("<color=red>🔴 深度模式</color>", _labelStyle);
+                        GUILayout.EndHorizontal();
+
+                        if (_deepCaptureToggle)
+                            GUILayout.Label("<color=yellow>⚠ 深度采集会增加性能开销和文件大小</color>", _labelStyle);
+                        GUILayout.Space(4);
+                    }
+
                     GUI.backgroundColor = new Color(0.2f, 0.8f, 0.2f, 0.9f);
                     if (GUILayout.Button("▶ Start Capture", GUILayout.Height(32)))
                     {
@@ -165,6 +186,16 @@ namespace GameAnalytics.Profiler.UI
                 }
                 else if (profiler.State == CaptureState.Capturing)
                 {
+                    // Show deep capture file size indicator
+                    if (profiler.config != null && profiler.config.enableDeepCapture)
+                    {
+                        long deepSize = profiler.DeepProfileDataSize;
+                        string sizeStr = deepSize > 1024 * 1024
+                            ? $"{deepSize / (1024f * 1024f):F1} MB"
+                            : $"{deepSize / 1024f:F0} KB";
+                        GUILayout.Label($"<color=red>🔴 深度采集中</color> - 文件: {sizeStr}", _labelStyle);
+                    }
+
                     GUI.backgroundColor = new Color(0.9f, 0.2f, 0.2f, 0.9f);
                     if (GUILayout.Button("■ Stop & Export", GUILayout.Height(32)))
                     {
@@ -179,6 +210,18 @@ namespace GameAnalytics.Profiler.UI
                 {
                     GUILayout.Space(4);
                     GUILayout.Label($"<color=green>✓ Saved:</color> {System.IO.Path.GetFileName(profiler.LastExportPath)}", _labelStyle);
+
+                    // Deep data upload button (shown after deep capture stops)
+                    if (profiler.HasDeepProfileData && profiler.State == CaptureState.Idle)
+                    {
+                        GUILayout.Space(4);
+                        long deepSize = profiler.DeepProfileDataSize;
+                        string sizeStr = deepSize > 1024 * 1024
+                            ? $"{deepSize / (1024f * 1024f):F1} MB"
+                            : $"{deepSize / 1024f:F0} KB";
+                        GUILayout.Label($"<color=cyan>深度数据:</color> {sizeStr}", _labelStyle);
+                        GUILayout.Label("<color=#888>深度数据可通过桌面端WiFi下载</color>", _labelStyle);
+                    }
                 }
 
                 // WiFi info
