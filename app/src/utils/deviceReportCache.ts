@@ -1,4 +1,4 @@
-import type { CallTreeNode, ModulePageAnalysis, PerFrameFunctions, ReportMeta, ResourceMemoryAnalysis } from '../api/tauri';
+import type { CallTreeNode, DeviceProfileReport, ModulePageAnalysis, PerFrameFunctions, ReportMeta, ResourceMemoryAnalysis } from '../api/tauri';
 
 const moduleAnalysisCache = new Map<string, ModulePageAnalysis>();
 const callTreeCache = new Map<string, CallTreeNode[]>();
@@ -6,6 +6,12 @@ const resourceMemoryCache = new Map<string, ResourceMemoryAnalysis>();
 const frameFunctionsCache = new Map<string, PerFrameFunctions>();
 const screenshotCache = new Map<string, string>();
 const reportHistoryCache = new Map<string, ReportMeta[]>();
+let currentDeviceReportView: {
+  tab: 'device' | 'report';
+  reportPage: string;
+  filePath: string;
+  report: DeviceProfileReport | null;
+} | null = null;
 
 const moduleKey = (filePath: string, moduleName: string) => `${filePath}::${moduleName}`;
 const callTreeKey = (filePath: string, direction: 'forward' | 'reverse') => `${filePath}::${direction}`;
@@ -64,4 +70,17 @@ export function setCachedReportHistory(projectPath: string | undefined, reports:
 
 export function clearCachedReportHistory(projectPath?: string) {
   reportHistoryCache.delete(reportHistoryKey(projectPath));
+}
+
+export function getCachedDeviceReportView() {
+  return currentDeviceReportView;
+}
+
+export function setCachedDeviceReportView(view: {
+  tab: 'device' | 'report';
+  reportPage: string;
+  filePath: string;
+  report: DeviceProfileReport | null;
+}) {
+  currentDeviceReportView = view;
 }

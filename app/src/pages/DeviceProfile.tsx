@@ -27,6 +27,7 @@ import ReportScreenshots from '../components/device/pages/ReportScreenshots';
 import ReportHistory from '../components/device/pages/ReportHistory';
 import { formatBeijingDateTime } from '../utils/time';
 import {
+  getCachedDeviceReportView,
   getCachedCallTree,
   getCachedFrameFunctions,
   getCachedModuleAnalysis,
@@ -34,6 +35,7 @@ import {
   getCachedResourceMemoryAnalysis,
   getCachedScreenshot,
   setCachedCallTree,
+  setCachedDeviceReportView,
   setCachedFrameFunctions,
   setCachedModuleAnalysis,
   setCachedReportHistory,
@@ -538,14 +540,15 @@ function AiDeviceSection({ filePath, report }: { filePath: string; report: Devic
 export default function DeviceProfile() {
   const { t } = useTranslation();
   const projectPath = useAppStore(s => s.project?.path);
-  const [tab, setTab] = useState<TabKey>('device');
+  const cachedDeviceReportView = getCachedDeviceReportView();
+  const [tab, setTab] = useState<TabKey>(() => cachedDeviceReportView?.tab ?? 'device');
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [selected, setSelected] = useState<DiscoveredDevice | null>(null);
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
   const [liveFrames, setLiveFrames] = useState<LiveDeviceFrame[]>([]);
-  const [report, setReport] = useState<DeviceProfileReport | null>(null);
-  const [filePath, setFilePath] = useState('');
+  const [report, setReport] = useState<DeviceProfileReport | null>(() => cachedDeviceReportView?.report ?? null);
+  const [filePath, setFilePath] = useState(() => cachedDeviceReportView?.filePath ?? '');
   const [manualIp, setManualIp] = useState('');
   const [manualPort, setManualPort] = useState('9527');
   const [sessionName, setSessionName] = useState('');
@@ -558,7 +561,7 @@ export default function DeviceProfile() {
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [preloadState, setPreloadState] = useState<ReportPreloadState>({ active: false, total: 0, completed: 0, current: '', errors: [] });
-  const [reportPage, setReportPage] = useState<ReportPage>('overview');
+  const [reportPage, setReportPage] = useState<ReportPage>(() => (cachedDeviceReportView?.reportPage as ReportPage) ?? 'overview');
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [aiChatMessagesByFile, setAiChatMessagesByFile] = useState<Record<string, DeviceAiChatMessage[]>>({});
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -1078,6 +1081,15 @@ export default function DeviceProfile() {
   const cpuTimeline = useMemo(() => liveFrames.map(frame => ({ time: frame.timestamp, value: frame.cpuTimeMs })), [liveFrames]);
   const gpuTimeline = useMemo(() => liveFrames.map(frame => ({ time: frame.timestamp, value: frame.gpuTimeMs })), [liveFrames]);
   const memoryTimeline = useMemo(() => liveFrames.map(frame => ({ time: frame.timestamp, value: frame.totalAllocated / 1024 / 1024 })), [liveFrames]);
+
+  useEffect(() => {
+    setCachedDeviceReportView({
+      tab,
+      reportPage,
+      filePath,
+      report,
+    });
+  }, [filePath, report, reportPage, tab]);
 
   useEffect(() => {
     const wasCapturing = previousCapturingRef.current;
