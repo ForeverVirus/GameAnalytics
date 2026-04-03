@@ -177,3 +177,7 @@ GameAnalytics/
 ├── README.md
 └── README_EN.md
 ```
+
+## 社区
+
+学 AI，上 L 站 — [LinuxDO](https://linux.do/)
